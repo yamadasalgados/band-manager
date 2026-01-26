@@ -2,7 +2,6 @@
 import { useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
 
-// Função necessária para converter a chave VAPID de string base64 para Uint8Array
 function urlBase64ToUint8Array(base64String: string) {
   const padding = '='.repeat((4 - base64String.length % 4) % 4);
   const base64 = (base64String + padding)
@@ -18,38 +17,33 @@ function urlBase64ToUint8Array(base64String: string) {
   return outputArray;
 }
 
-// ✅ MUDANÇA: membroId agora é opcional (?) para não travar o layout.tsx
 interface PushProps {
   membroId?: string; 
 }
 
 export default function PushInitializer({ membroId }: PushProps) {
   useEffect(() => {
-    // 1. Verifica suporte do navegador e se temos um ID (seja via prop ou localStorage)
-    const idFinal = membroId || (typeof window !== 'undefined' ? localStorage.getItem('usuario_ativo_id') : null);
-
-    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !idFinal) {
+    // 1. Verifica apenas o suporte básico do navegador
+    if (typeof window === 'undefined' || !('serviceWorker' in navigator) || !('PushManager' in window)) {
       return;
     }
 
     const initPush = async () => {
       try {
-        // 2. Verifica se a permissão já foi negada para não incomodar o usuário
+        // 2. Verifica se a permissão já foi negada. Se for 'default', ele pedirá.
         if (Notification.permission === 'denied') return;
 
-        // 3. Pede permissão ao usuário
+        // 3. Pede permissão ao usuário (Aqui o navegador mostra o prompt)
         const permission = await Notification.requestPermission();
         if (permission !== 'granted') return;
 
         // 4. Registra ou recupera o Service Worker
-        // Certifique-se que o arquivo sw.js existe em /public
         const registration = await navigator.serviceWorker.register('/sw.js');
         const ready = await navigator.serviceWorker.ready;
 
-        // 5. Verifica se já existe uma assinatura
+        // 5. Gerencia a assinatura
         let subscription = await ready.pushManager.getSubscription();
 
-        // 6. Se não existir, cria uma nova
         if (!subscription) {
           const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
           
@@ -64,16 +58,21 @@ export default function PushInitializer({ membroId }: PushProps) {
           });
         }
 
-        // 7. Salva no Supabase
-        // Usamos idFinal que pode vir da prop ou do storage
-        const { error } = await supabase
-          .from('membros')
-          .update({ 
-            push_subscription: JSON.parse(JSON.stringify(subscription)) 
-          })
-          .eq('id', idFinal);
+        // 6. LÓGICA DE SALVAMENTO CONDICIONAL
+        // Tenta pegar o ID da prop ou de qualquer chave comum de perfil ativo
+        const idFinal = membroId || localStorage.getItem('usuario_ativo_id') || localStorage.getItem('perfil_id');
 
-        if (error) console.error('Erro ao salvar push no Supabase:', error);
+        // Só tenta dar o update no Supabase se de fato tivermos um ID de membro
+        if (idFinal && subscription) {
+          const { error } = await supabase
+            .from('membros')
+            .update({ 
+              push_subscription: JSON.parse(JSON.stringify(subscription)) 
+            })
+            .eq('id', idFinal);
+
+          if (error) console.error('Erro ao salvar push no Supabase:', error);
+        }
 
       } catch (err) {
         console.error('Erro no fluxo de Push:', err);
@@ -81,7 +80,7 @@ export default function PushInitializer({ membroId }: PushProps) {
     };
 
     initPush();
-  }, [membroId]);
+  }, [membroId]); // Se o membroId mudar (login), ele tenta salvar novamente
 
   return null;
 }
