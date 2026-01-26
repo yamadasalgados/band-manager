@@ -3,7 +3,6 @@ import { useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
 
 // Função necessária para converter a chave VAPID de string base64 para Uint8Array
-// (O navegador exige esse formato específico)
 function urlBase64ToUint8Array(base64String: string) {
   const padding = '='.repeat((4 - base64String.length % 4) % 4);
   const base64 = (base64String + padding)
@@ -19,28 +18,38 @@ function urlBase64ToUint8Array(base64String: string) {
   return outputArray;
 }
 
-export default function PushInitializer({ membroId }: { membroId: string }) {
+// ✅ MUDANÇA: membroId agora é opcional (?) para não travar o layout.tsx
+interface PushProps {
+  membroId?: string; 
+}
+
+export default function PushInitializer({ membroId }: PushProps) {
   useEffect(() => {
-    // 1. Verifica suporte do navegador
-    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !membroId) {
+    // 1. Verifica suporte do navegador e se temos um ID (seja via prop ou localStorage)
+    const idFinal = membroId || (typeof window !== 'undefined' ? localStorage.getItem('usuario_ativo_id') : null);
+
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !idFinal) {
       return;
     }
 
     const initPush = async () => {
       try {
-        // 2. Pede permissão ao usuário (se ainda não tiver)
+        // 2. Verifica se a permissão já foi negada para não incomodar o usuário
+        if (Notification.permission === 'denied') return;
+
+        // 3. Pede permissão ao usuário
         const permission = await Notification.requestPermission();
         if (permission !== 'granted') return;
 
-        // 3. Registra ou recupera o Service Worker
-        // Nota: O arquivo sw.js precisa estar na pasta /public
+        // 4. Registra ou recupera o Service Worker
+        // Certifique-se que o arquivo sw.js existe em /public
         const registration = await navigator.serviceWorker.register('/sw.js');
-        await navigator.serviceWorker.ready;
+        const ready = await navigator.serviceWorker.ready;
 
-        // 4. Verifica se já existe uma assinatura
-        let subscription = await registration.pushManager.getSubscription();
+        // 5. Verifica se já existe uma assinatura
+        let subscription = await ready.pushManager.getSubscription();
 
-        // 5. Se não existir, cria uma nova
+        // 6. Se não existir, cria uma nova
         if (!subscription) {
           const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
           
@@ -49,20 +58,20 @@ export default function PushInitializer({ membroId }: { membroId: string }) {
             return;
           }
 
-          subscription = await registration.pushManager.subscribe({
+          subscription = await ready.pushManager.subscribe({
             userVisibleOnly: true,
             applicationServerKey: urlBase64ToUint8Array(vapidKey)
           });
         }
 
-        // 6. Salva no Supabase (apenas o JSON da subscription)
-        // A coluna 'push_subscription' no banco deve ser do tipo JSON ou JSONB
+        // 7. Salva no Supabase
+        // Usamos idFinal que pode vir da prop ou do storage
         const { error } = await supabase
           .from('membros')
           .update({ 
             push_subscription: JSON.parse(JSON.stringify(subscription)) 
           })
-          .eq('id', membroId);
+          .eq('id', idFinal);
 
         if (error) console.error('Erro ao salvar push no Supabase:', error);
 
