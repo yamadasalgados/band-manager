@@ -9,8 +9,7 @@ const nextConfig = {
       },
     ],
   },
-  // Opcional: Desativa o log de telemetria da Next no console
-  telemetry: false,
+  // ✅ A configuração de telemetria foi removida daqui para evitar o erro de build.
 };
 
 export default nextConfig;
