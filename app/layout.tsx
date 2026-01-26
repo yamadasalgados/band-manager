@@ -3,7 +3,6 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import ClientProviders from "./ClientProviders";
 import SubscriptionGuard from "@/components/SubscriptionGuard";
-import PushInitializer from "@/components/PushInitializer"; // ✅ Importe o novo componente
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -38,9 +37,7 @@ export const viewport: Viewport = {
   viewportFit: "cover",
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{ children: React.ReactNode }>) {
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="pt-br" className="dark" suppressHydrationWarning>
       <body
@@ -53,12 +50,9 @@ export default function RootLayout({
         ].join(" ")}
       >
         <ClientProviders>
-          {/* ✅ Inicializa o OneSignal e pede permissão de Push */}
-          <PushInitializer />
-          
-          <SubscriptionGuard>
-            {children}
-          </SubscriptionGuard>
+          {/* ✅ OneSignal init (não registra /sw.js) */}
+
+          <SubscriptionGuard>{children}</SubscriptionGuard>
         </ClientProviders>
       </body>
     </html>

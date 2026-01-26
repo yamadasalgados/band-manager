@@ -19,7 +19,7 @@ self.addEventListener('push', function(event) {
     }
   }
 
-  const title = data.title || "Weekend Loop Backstage";
+  const title = data.title || "Backstage Control";
   const options = {
     body: data.body || "Você tem uma nova atualização da banda.",
     icon: '/icon-192x192.png',
