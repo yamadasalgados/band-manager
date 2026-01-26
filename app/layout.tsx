@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import ClientProviders from "./ClientProviders";
 import SubscriptionGuard from "@/components/SubscriptionGuard";
+import PushInitializer from "@/components/PushInitializer"; // ✅ Importe o novo componente
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -48,12 +49,16 @@ export default function RootLayout({
           geistMono.variable,
           "antialiased bg-slate-950 min-h-screen selection:bg-blue-500/30",
           "w-full max-w-[100vw] overflow-x-hidden",
-          // ✅ SAFE AREA TOP (resolve ícones cortados no Android/iOS)
           "pt-[env(safe-area-inset-top)]",
         ].join(" ")}
       >
         <ClientProviders>
-          <SubscriptionGuard>{children}</SubscriptionGuard>
+          {/* ✅ Inicializa o OneSignal e pede permissão de Push */}
+          <PushInitializer />
+          
+          <SubscriptionGuard>
+            {children}
+          </SubscriptionGuard>
         </ClientProviders>
       </body>
     </html>
