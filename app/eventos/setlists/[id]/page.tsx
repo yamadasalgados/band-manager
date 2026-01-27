@@ -47,31 +47,47 @@ export default function GerenciarSetlist({ params }: { params: Promise<{ id: str
   // =========================
   // ✅ push helper (agora manda externalUserIds)
   // =========================
-  const sendPush = useCallback(
-    async (args: { title: string; message: string; url?: string; data?: Record<string, any> }) => {
-      try {
-        if (!membrosIds.length) {
-          console.warn('Sem membrosIds para enviar push (externalUserIds vazio).');
-          return;
-        }
-
-        await fetch('/api/onesignal/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            title: args.title,
-            message: args.message,
-            url: args.url || `/eventos/setlists/${eventoId}`,
-            externalUserIds: membrosIds, // ✅ AQUI está o segredo
-            data: args.data || undefined,
-          }),
-        });
-      } catch (e) {
-        console.error('Erro ao disparar push:', e);
+const sendPush = useCallback(
+  async (args: { title: string; message: string; url?: string; data?: Record<string, any> }) => {
+    try {
+      if (!membrosIds.length) {
+        console.warn("Sem membrosIds para enviar push (externalUserIds vazio).");
+        return;
       }
-    },
-    [eventoId, membrosIds]
-  );
+
+      const r = await fetch("/api/onesignal/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: args.title,
+          message: args.message,
+          url: args.url || `/eventos/setlists/${eventoId}`,
+          externalUserIds: membrosIds,
+          data: args.data || undefined,
+        }),
+      });
+
+      const text = await r.text();
+      const json = (() => {
+        try {
+          return text ? JSON.parse(text) : {};
+        } catch {
+          return {};
+        }
+      })();
+
+      if (!r.ok || !json?.ok) {
+        console.error("sendPush(Setlist) failed:", json);
+      } else {
+        console.log("sendPush(Setlist) ok:", json?.result);
+      }
+    } catch (e) {
+      console.error("Erro ao disparar push:", e);
+    }
+  },
+  [eventoId, membrosIds]
+);
+
 
   // =========================
   // ✅ carregar dados
@@ -82,13 +98,20 @@ export default function GerenciarSetlist({ params }: { params: Promise<{ id: str
     setLoading(true);
     try {
       // 1) membros da org => externalUserIds
-      const { data: mems, error: eM } = await supabase
-        .from('membros')
-        .select('id')
-        .eq('org_id', org.id);
+const { data: confs, error: eM } = await supabase
+  .from("escalas")
+  .select("membro_id")
+  .eq("org_id", org.id)
+  .eq("evento_id", eventoId)
+  .eq("status", "confirmado");
 
-      if (eM) throw eM;
-      setMembrosIds((mems || []).map((m: any) => String(m.id)).filter(Boolean));
+if (eM) throw eM;
+
+setMembrosIds(
+  (confs || [])
+    .map((x: any) => String(x?.membro_id || "").trim())
+    .filter(Boolean)
+);
 
       // 2) repertório
       const { data: todas, error: e1 } = await supabase
