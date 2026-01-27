@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import {
   UserPlus,
@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import OneSignal from 'react-onesignal'; // ✅ Importação necessária
+import OneSignal from 'react-onesignal';
 
 import { useOrg } from '@/contexts/OrgContext';
 import MultiSelectSubfuncoes from '@/components/MultiSelectSubfuncoes';
@@ -108,24 +108,73 @@ export default function PerfilAdmin() {
 
   const USE_MULTISELECT_SUBFUNCOES = false;
 
+  // ---------- OneSignal (robusto / sem notifyButton pra não quebrar TS) ----------
+  const [oneSignalReady, setOneSignalReady] = useState(false);
+  const oneSignalInitOnceRef = useRef(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (oneSignalInitOnceRef.current) return;
+    oneSignalInitOnceRef.current = true;
+
+    const appId = process.env.NEXT_PUBLIC_ONESIGNAL_APP_ID;
+    if (!appId) {
+      console.warn('[OneSignal] NEXT_PUBLIC_ONESIGNAL_APP_ID ausente.');
+      return;
+    }
+
+    (async () => {
+      try {
+        // ✅ NÃO passe notifyButton aqui, porque o tipo do pacote exige campos obrigatórios
+        await OneSignal.init({
+          appId,
+          allowLocalhostAsSecureOrigin: true,
+        } as any);
+
+        // Não force pop-up em loop: só pede se ainda não tiver
+        try {
+ const hasPermission = await OneSignal.Notifications.permission;
+if (!hasPermission) {
+  await OneSignal.Notifications.requestPermission();
+}
+
+        } catch {}
+
+        setOneSignalReady(true);
+        console.log('[OneSignal] init ok');
+      } catch (e) {
+        console.error('[OneSignal] init error:', e);
+      }
+    })();
+  }, []);
+
+const syncOneSignalLogin = useCallback(
+  async (membroId: string) => {
+    if (!membroId || typeof window === 'undefined') return;
+    if (!oneSignalReady) return;
+
+    try {
+      const hasPermission = await OneSignal.Notifications.permission;
+      if (!hasPermission) {
+        await OneSignal.Notifications.requestPermission();
+      }
+
+      await OneSignal.login(String(membroId));
+      console.log('[OneSignal] logged as', membroId);
+    } catch (e) {
+      console.error('Erro OneSignal Login:', e);
+    }
+  },
+  [oneSignalReady] // ✅ deps obrigatórias
+);
+
+  // ---------------------------------------------------------------------------
+
   const pinMestreNoBanco = useMemo(() => {
     const raw = String(org?.pin_acesso || PIN_MESTRE_DEFAULT);
     const digits = raw.replace(/\D/g, '');
     return digits.length === 6 ? digits : PIN_MESTRE_DEFAULT;
   }, [org?.pin_acesso]);
-
-  // ✅ Função de Sincronização OneSignal
-  const syncOneSignalLogin = useCallback((membroId: string) => {
-    if (typeof window !== 'undefined' && membroId) {
-      localStorage.setItem('usuario_ativo_id', membroId);
-      localStorage.setItem('perfil_id', membroId);
-      try {
-        OneSignal.login(membroId);
-      } catch (e) {
-        console.error('Erro OneSignal Login:', e);
-      }
-    }
-  }, []);
 
   useEffect(() => {
     try {
@@ -142,6 +191,11 @@ export default function PerfilAdmin() {
       setFase('cadastro');
     }
   }, [syncOneSignalLogin]);
+
+  useEffect(() => {
+    if (!oneSignalReady) return;
+    if (userAtivo?.id) syncOneSignalLogin(userAtivo.id);
+  }, [oneSignalReady, userAtivo?.id, syncOneSignalLogin]);
 
   useEffect(() => {
     if (!org) return;
@@ -181,7 +235,7 @@ export default function PerfilAdmin() {
 
     setUserAtivo(usuario);
     localStorage.setItem('usuario_ativo', JSON.stringify(usuario));
-    syncOneSignalLogin(usuario.id); // ✅ Sincroniza OneSignal
+    syncOneSignalLogin(usuario.id);
 
     setEditandoAtivo(false);
     setEditFuncao('');
@@ -236,7 +290,7 @@ export default function PerfilAdmin() {
 
     setUserAtivo(data);
     localStorage.setItem('usuario_ativo', JSON.stringify(data));
-    syncOneSignalLogin(data.id); // ✅ Sincroniza OneSignal no Cadastro
+    syncOneSignalLogin(data.id);
 
     await carregarMembros();
     setSubfuncoesSelecionadas([]);
@@ -252,11 +306,15 @@ export default function PerfilAdmin() {
     setLoading(false);
   }
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     localStorage.removeItem('usuario_ativo');
     localStorage.removeItem('usuario_ativo_id');
     localStorage.removeItem('perfil_id');
-    try { OneSignal.logout(); } catch (e) {}
+
+    try {
+      if (oneSignalReady) await OneSignal.logout();
+    } catch {}
+
     setUserAtivo(null);
     setEditandoAtivo(false);
     setFase('cadastro');
@@ -281,8 +339,15 @@ export default function PerfilAdmin() {
   const subfuncoesDisponiveis = useMemo(() => {
     const base = [...OPCOES_INSTRUMENTOS];
     const funcoesDoBanco = (membros || []).map((m) => String(m?.funcao || '').trim()).filter(Boolean);
-    const subfuncoesDoBanco = (membros || []).flatMap((m) => toArraySubfuncoes(m?.subfuncao)).map((s) => String(s || '').trim()).filter(Boolean);
-    return Array.from(new Set([...base, ...funcoesDoBanco, ...subfuncoesDoBanco])).filter(Boolean).sort((a, b) => a.localeCompare(b, 'pt-BR', { sensitivity: 'base' }));
+
+    const subfuncoesDoBanco = (membros || [])
+      .flatMap((m) => toArraySubfuncoes(m?.subfuncao))
+      .map((s) => String(s || '').trim())
+      .filter(Boolean);
+
+    return Array.from(new Set([...base, ...funcoesDoBanco, ...subfuncoesDoBanco]))
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b, 'pt-BR', { sensitivity: 'base' }));
   }, [membros]);
 
   const abrirEdicaoAtivo = () => {
@@ -312,19 +377,31 @@ export default function PerfilAdmin() {
 
   const salvarEdicaoAtivo = async () => {
     if (!userAtivo?.id) return;
-    const funcaoFinal = editUsarFuncaoCustom ? String(editFuncaoCustom || '').trim() : String(editFuncao || '').trim();
-    if (!funcaoFinal) { alert('Selecione a função principal.'); return; }
+
+    const funcaoFinal = editUsarFuncaoCustom
+      ? String(editFuncaoCustom || '').trim()
+      : String(editFuncao || '').trim();
+
+    if (!funcaoFinal) {
+      alert('Selecione a função principal.');
+      return;
+    }
+
     setSalvandoEdicao(true);
     try {
       const payload = { funcao: funcaoFinal, subfuncao: editSubfuncoes };
       const { data, error } = await supabase.from('membros').update(payload).eq('id', userAtivo.id).select('*');
       if (error) throw error;
+
       const membroAtualizado = data?.[0];
       if (!membroAtualizado) throw new Error('Não foi possível atualizar o membro.');
+
       setUserAtivo(membroAtualizado);
       localStorage.setItem('usuario_ativo', JSON.stringify(membroAtualizado));
       setMembros((prev) => prev.map((m) => (m.id === membroAtualizado.id ? membroAtualizado : m)));
+
       cancelarEdicaoAtivo();
+
       setSucesso(true);
       setTimeout(() => setSucesso(false), 1200);
     } catch (e: any) {
@@ -334,12 +411,14 @@ export default function PerfilAdmin() {
     }
   };
 
-  const readMultiSelectValues = (el: HTMLSelectElement): string[] => Array.from(el.selectedOptions).map((o) => o.value).filter(Boolean);
+  const readMultiSelectValues = (el: HTMLSelectElement): string[] =>
+    Array.from(el.selectedOptions).map((o) => o.value).filter(Boolean);
 
   const handlePinChange = async (val: string) => {
     const onlyDigits = String(val || '').replace(/\D/g, '').slice(0, 6);
     setPinInput(onlyDigits);
     if (onlyDigits.length !== 6) return;
+
     try {
       setLoading(true);
       const res = await fetch('/api/org/verify-pin', {
@@ -362,22 +441,29 @@ export default function PerfilAdmin() {
   const salvarConfigsBanda = async () => {
     if (!org?.id) return alert('Erro: Organização não identificada.');
     let pinParaSalvar: string | undefined = undefined;
+
     if (alterarPin) {
       const pinDigits = String(novoPinEdit || '').replace(/\D/g, '');
       if (pinDigits.length !== 6) return alert('O novo PIN deve ter exatamente 6 números.');
       pinParaSalvar = pinDigits;
     }
+
     setLoading(true);
     try {
       const novoSlug = slugify(slugBandaEdit || nomeBandaEdit);
       const payload: any = { nome: String(nomeBandaEdit || '').trim(), slug: novoSlug };
       if (pinParaSalvar) payload.pin_acesso = pinParaSalvar;
+
       const { error } = await supabase.from('organizacoes').update(payload).eq('id', org.id);
       if (error) throw error;
+
       setSucesso(true);
       setAlterarPin(false);
       setNovoPinEdit('');
-      setTimeout(() => { setSucesso(false); router.refresh(); }, 1200);
+      setTimeout(() => {
+        setSucesso(false);
+        router.refresh();
+      }, 1200);
     } catch (err: any) {
       alert('Erro ao salvar: ' + (err?.message || 'Verifique sua conexão.'));
     } finally {
@@ -390,11 +476,13 @@ export default function PerfilAdmin() {
     try {
       const { error } = await supabase.from('membros').delete().eq('id', membroId);
       if (error) throw error;
+
       if (userAtivo?.id === membroId) {
         localStorage.removeItem('usuario_ativo');
         setUserAtivo(null);
         setEditandoAtivo(false);
       }
+
       await carregarMembros();
     } catch {
       alert('Erro ao deletar');
@@ -427,7 +515,12 @@ export default function PerfilAdmin() {
               <h2 className="text-lg font-black text-yellow-500 uppercase italic">Link Inválido</h2>
               <p className="text-xs font-bold text-slate-400 mt-2">Você acessou esta página sem um convite de banda.</p>
             </div>
-            <Link href="/" className="inline-block bg-slate-900 text-white px-6 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest border border-white/10 hover:bg-slate-800 transition-colors">Voltar ao Início</Link>
+            <Link
+              href="/"
+              className="inline-block bg-slate-900 text-white px-6 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest border border-white/10 hover:bg-slate-800 transition-colors"
+            >
+              Voltar ao Início
+            </Link>
           </div>
         )}
 
@@ -437,15 +530,36 @@ export default function PerfilAdmin() {
               <header className="w-full mx-w-md flex items-center justify-between mb-8 pt-4">
                 <Link href="/" className="group block transition-transform active:scale-95">
                   <div className="text-left">
-                    <h2 className="text-blue-500 text-[10px] font-black uppercase tracking-[0.4em] mb-1">{org?.nome || 'Banda'}</h2>
+                    <h2 className="text-blue-500 text-[10px] font-black uppercase tracking-[0.4em] mb-1">
+                      {org?.nome || 'Banda'}
+                    </h2>
                     <h1 className="text-3xl font-black italic tracking-tighter uppercase leading-[0.8] text-white group-hover:text-slate-200 transition-colors">
-                      {fase === 'admin' && <>Área do<br />Líder</>}
-                      {fase === 'cadastro' && <>Criar<br />Usuário</>}
-                      {fase === 'identidade' && <>Selecionar<br />Usuário</>}
+                      {fase === 'admin' && (
+                        <>
+                          Área do<br />
+                          Líder
+                        </>
+                      )}
+                      {fase === 'cadastro' && (
+                        <>
+                          Criar<br />
+                          Usuário
+                        </>
+                      )}
+                      {fase === 'identidade' && (
+                        <>
+                          Selecionar<br />
+                          Usuário
+                        </>
+                      )}
                     </h1>
                   </div>
                 </Link>
-                <button onClick={() => router.back()} className="text-blue-500 flex items-center gap-2 font-bold uppercase text-[16px] tracking-widest hover:text-white transition-colors">
+
+                <button
+                  onClick={() => router.back()}
+                  className="text-blue-500 flex items-center gap-2 font-bold uppercase text-[16px] tracking-widest hover:text-white transition-colors"
+                >
                   <ArrowLeft size={16} /> Voltar
                 </button>
               </header>
@@ -460,41 +574,181 @@ export default function PerfilAdmin() {
                       <ShieldCheck size={32} />
                     </div>
                     <p className="text-[12px] font-black text-white-500 uppercase tracking-[0.3em]">Digite o PIN de acesso</p>
-                    <input type="password" maxLength={6} inputMode="numeric" value={pinInput} onChange={(e) => handlePinChange(e.target.value)} className="w-full bg-slate-950 border border-white/10 p-5 rounded-2xl text-center text-3xl font-black tracking-[0.5em] text-blue-500 outline-none focus:border-blue-600" autoFocus />
-                    <button onClick={() => { setAdminAutenticado(false); setPinInput(''); setFase('identidade'); }} className="text-[12px] font-black text-white-600 uppercase">Cancelar</button>
+                    <input
+                      type="password"
+                      maxLength={6}
+                      inputMode="numeric"
+                      value={pinInput}
+                      onChange={(e) => handlePinChange(e.target.value)}
+                      className="w-full bg-slate-950 border border-white/10 p-5 rounded-2xl text-center text-3xl font-black tracking-[0.5em] text-blue-500 outline-none focus:border-blue-600"
+                      autoFocus
+                    />
+                    <button
+                      onClick={() => {
+                        setAdminAutenticado(false);
+                        setPinInput('');
+                        setFase('identidade');
+                      }}
+                      className="text-[12px] font-black text-white-600 uppercase"
+                    >
+                      Cancelar
+                    </button>
                   </div>
                 ) : (
                   <div className="space-y-6">
-                    <section className="bg-slate-900 border relative overfow-hidden border-white/5 p-8 rounded-[3rem] shadow-xl space-y-5">
+                    <section className="bg-slate-900 border relative overflow-hidden border-white/5 p-8 rounded-[3rem] shadow-xl space-y-5">
                       <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-50" />
-                      <div className="flex items-center gap-3 text-blue-500 mb-2"><Building2 size={20} /><h2 className="text-sm font-black uppercase italic tracking-widest">Banda & Segurança</h2></div>
-                      <input value={nomeBandaEdit} onChange={(e) => setNomeBandaEdit(e.target.value)} className="w-full bg-slate-950 p-4 rounded-xl border border-white/5 font-bold outline-none focus:border-blue-500" placeholder="Nome da Banda" />
-                      <div className="flex items-center bg-slate-950 p-4 rounded-xl border border-white/5"><span className="text-yellow-600 text-m font-mono">slug/</span><input value={slugBandaEdit} onChange={(e) => setSlugBandaEdit(slugify(e.target.value))} className="w-full bg-transparent outline-none font-bold ml-1" placeholder="minha-banda" /></div>
-                      <div className="bg-slate-950 p-4 rounded-xl border border-white/5 space-y-3">
-                        <div className="flex items-center justify-between"><div className="flex items-center gap-2"><Key size={14} className="text-slate-600" /><span className="text-[12px] font-mono text-yellow-600 uppercase">PIN de acesso</span></div>{!alterarPin && <button type="button" onClick={() => setAlterarPin(true)} className="text-[10px] font-black uppercase tracking-widest text-blue-500 hover:text-yellow-400">Alterar PIN</button>}</div>
-                        {!alterarPin ? <p className="text-[11px] font-mono text-slate-400">PIN configurado ••••••</p> : <input value={novoPinEdit} maxLength={6} inputMode="numeric" onChange={(e) => setNovoPinEdit(e.target.value.replace(/\D/g, '').slice(0, 6))} className="w-full bg-transparent outline-none font-bold text-white tracking-[0.3em]" placeholder="Digite o novo PIN (6 números)" />}
+                      <div className="flex items-center gap-3 text-blue-500 mb-2">
+                        <Building2 size={20} />
+                        <h2 className="text-sm font-black uppercase italic tracking-widest">Banda & Segurança</h2>
                       </div>
-                      <button onClick={salvarConfigsBanda} disabled={loading} className="w-full bg-blue-500/5 border border-blue-500/20 text-blue-500 py-5 rounded-2xl font-black uppercase text-[14px] tracking-[0.2em] active:scale-95 flex items-center justify-center gap-3 hover:border-blue-500/40 shadow-blue-500/10 hover:text-white transition-all shadow-xl disabled:opacity-60">{loading ? <><Loader2 className="animate-spin" size={16} /> GRAVANDO...</> : <><Save size={16} /> Salvar Alterações</>}</button>
+
+                      <input
+                        value={nomeBandaEdit}
+                        onChange={(e) => setNomeBandaEdit(e.target.value)}
+                        className="w-full bg-slate-950 p-4 rounded-xl border border-white/5 font-bold outline-none focus:border-blue-500"
+                        placeholder="Nome da Banda"
+                      />
+
+                      <div className="flex items-center bg-slate-950 p-4 rounded-xl border border-white/5">
+                        <span className="text-yellow-600 text-m font-mono">slug/</span>
+                        <input
+                          value={slugBandaEdit}
+                          onChange={(e) => setSlugBandaEdit(slugify(e.target.value))}
+                          className="w-full bg-transparent outline-none font-bold ml-1"
+                          placeholder="minha-banda"
+                        />
+                      </div>
+
+                      <div className="bg-slate-950 p-4 rounded-xl border border-white/5 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <Key size={14} className="text-slate-600" />
+                            <span className="text-[12px] font-mono text-yellow-600 uppercase">PIN de acesso</span>
+                          </div>
+                          {!alterarPin && (
+                            <button
+                              type="button"
+                              onClick={() => setAlterarPin(true)}
+                              className="text-[10px] font-black uppercase tracking-widest text-blue-500 hover:text-yellow-400"
+                            >
+                              Alterar PIN
+                            </button>
+                          )}
+                        </div>
+
+                        {!alterarPin ? (
+                          <p className="text-[11px] font-mono text-slate-400">PIN configurado ••••••</p>
+                        ) : (
+                          <input
+                            value={novoPinEdit}
+                            maxLength={6}
+                            inputMode="numeric"
+                            onChange={(e) => setNovoPinEdit(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                            className="w-full bg-transparent outline-none font-bold text-white tracking-[0.3em]"
+                            placeholder="Digite o novo PIN (6 números)"
+                          />
+                        )}
+                      </div>
+
+                      <button
+                        onClick={salvarConfigsBanda}
+                        disabled={loading}
+                        className="w-full bg-blue-500/5 border border-blue-500/20 text-blue-500 py-5 rounded-2xl font-black uppercase text-[14px] tracking-[0.2em] active:scale-95 flex items-center justify-center gap-3 hover:border-blue-500/40 shadow-blue-500/10 hover:text-white transition-all shadow-xl disabled:opacity-60"
+                      >
+                        {loading ? (
+                          <>
+                            <Loader2 className="animate-spin" size={16} /> GRAVANDO...
+                          </>
+                        ) : (
+                          <>
+                            <Save size={16} /> Salvar Alterações
+                          </>
+                        )}
+                      </button>
                     </section>
+
                     <section className="bg-slate-900 border relative overflow-hidden border-white/5 p-8 rounded-[3rem] shadow-xl">
                       <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-50" />
-                      <div className="flex items-center gap-3 text-blue-500 mb-4"><Users size={20} /><h2 className="text-sm font-black uppercase italic tracking-widest">Gerenciar Time</h2><div className="ml-auto"><h3 className="text-sm font-black text-green-500 uppercase italic tracking-widest">Convite</h3></div></div>
-                      <div className="bg-slate-950 p-4 rounded-xl flex items-center justify-between gap-3 border border-white/5"><code className="text-l font-mono text-gray-300 truncate italic">.../perfil?org={String(orgIdAtivo).slice(0, 8)}</code><button onClick={copiarLinkConvite} className="p-2 bg-slate-900 rounded-lg border border-white/10">{copiadoLink ? <Check size={16} className="text-emerald-500" /> : <Copy size={16} className="text-slate-400" />}</button></div>
+                      <div className="flex items-center gap-3 text-blue-500 mb-4">
+                        <Users size={20} />
+                        <h2 className="text-sm font-black uppercase italic tracking-widest">Gerenciar Time</h2>
+                        <div className="ml-auto">
+                          <h3 className="text-sm font-black text-green-500 uppercase italic tracking-widest">Convite</h3>
+                        </div>
+                      </div>
+
+                      <div className="bg-slate-950 p-4 rounded-xl flex items-center justify-between gap-3 border border-white/5">
+                        <code className="text-l font-mono text-gray-300 truncate italic">
+                          .../perfil?org={String(orgIdAtivo).slice(0, 8)}
+                        </code>
+                        <button onClick={copiarLinkConvite} className="p-2 bg-slate-900 rounded-lg border border-white/10">
+                          {copiadoLink ? <Check size={16} className="text-emerald-500" /> : <Copy size={16} className="text-slate-400" />}
+                        </button>
+                      </div>
+
                       <div className="space-y-3 max-h-[320px] overflow-y-auto no-scrollbar mt-4">
-                        {membros.map((m) => (<div key={m.id} className="flex items-center justify-between p-4 bg-slate-950 rounded-2xl border border-white/5"><div className="min-w-0"><p className="text-l font-black uppercase truncate">{m.nome}</p><p className="text-[14px] text-slate-500 uppercase truncate">{m.funcao}</p></div><button onClick={() => deletarMembro(m.id, m.nome)} className="p-2 text-red-500/50 hover:text-red-500 transition-colors"><Trash2 size={16} /></button></div>))}
-                        {membros.length === 0 && <div className="p-4 bg-slate-950 rounded-2xl border border-dashed border-white/10 text-center"><p className="text-[10px] font-black text-slate-600 uppercase tracking-widest">Sem membros</p></div>}
+                        {membros.map((m) => (
+                          <div key={m.id} className="flex items-center justify-between p-4 bg-slate-950 rounded-2xl border border-white/5">
+                            <div className="min-w-0">
+                              <p className="text-l font-black uppercase truncate">{m.nome}</p>
+                              <p className="text-[14px] text-slate-500 uppercase truncate">{m.funcao}</p>
+                            </div>
+                            <button onClick={() => deletarMembro(m.id, m.nome)} className="p-2 text-red-500/50 hover:text-red-500 transition-colors">
+                              <Trash2 size={16} />
+                            </button>
+                          </div>
+                        ))}
+
+                        {membros.length === 0 && (
+                          <div className="p-4 bg-slate-950 rounded-2xl border border-dashed border-white/10 text-center">
+                            <p className="text-[10px] font-black text-slate-600 uppercase tracking-widest">Sem membros</p>
+                          </div>
+                        )}
                       </div>
                     </section>
+
                     <section className="bg-slate-900 border relative overflow-hidden border-white/5 p-8 rounded-[3rem] shadow-xl space-y-4">
                       <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-50" />
-                      <div className="flex items-center gap-3 text-yellow-500 mb-2"><CreditCard size={20} /><h2 className="text-sm font-black uppercase italic tracking-widest">Plano</h2></div>
-                      <div className="space-y-2">
-                        <div className="flex justify-between items-center bg-slate-950 p-4 rounded-xl border border-white/5"><span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Status</span><span className={`text-[10px] font-black uppercase px-2 py-1 rounded ${isAtivo ? 'bg-emerald-500/10 text-emerald-500' : 'bg-red-500/10 text-red-500'}`}>{statusAssinatura}</span></div>
-                        <div className="flex justify-between items-center bg-slate-950 p-4 rounded-xl border border-white/5"><span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Expira em</span><span className="text-[12px] font-mono font-bold text-white uppercase">{org?.data_expiracao ? new Date(org.data_expiracao).toLocaleDateString('pt-BR') : '—'}</span></div>
+                      <div className="flex items-center gap-3 text-yellow-500 mb-2">
+                        <CreditCard size={20} />
+                        <h2 className="text-sm font-black uppercase italic tracking-widest">Plano</h2>
                       </div>
-                      {!isAtivo && <Link href="/checkout" className="block w-full bg-red-600 hover:bg-red-500 transition-colors py-4 rounded-xl font-black uppercase text-[10px] text-center shadow-lg shadow-red-900/20">Regularizar Agora</Link>}
+
+                      <div className="space-y-2">
+                        <div className="flex justify-between items-center bg-slate-950 p-4 rounded-xl border border-white/5">
+                          <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Status</span>
+                          <span className={`text-[10px] font-black uppercase px-2 py-1 rounded ${isAtivo ? 'bg-emerald-500/10 text-emerald-500' : 'bg-red-500/10 text-red-500'}`}>
+                            {statusAssinatura}
+                          </span>
+                        </div>
+
+                        <div className="flex justify-between items-center bg-slate-950 p-4 rounded-xl border border-white/5">
+                          <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Expira em</span>
+                          <span className="text-[12px] font-mono font-bold text-white uppercase">
+                            {org?.data_expiracao ? new Date(org.data_expiracao).toLocaleDateString('pt-BR') : '—'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {!isAtivo && (
+                        <Link href="/checkout" className="block w-full bg-red-600 hover:bg-red-500 transition-colors py-4 rounded-xl font-black uppercase text-[10px] text-center shadow-lg shadow-red-900/20">
+                          Regularizar Agora
+                        </Link>
+                      )}
                     </section>
-                    <button onClick={() => { setAdminAutenticado(false); setPinInput(''); setFase('identidade'); }} className="w-full py-4 text-[14px] font-black uppercase relative hover:text-blue-500 text-white-600 tracking-widest"><div className="absolute top-0 left-0 w-full  h-1 bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-50" />Sair do Modo Admin</button>
+
+                    <button
+                      onClick={() => {
+                        setAdminAutenticado(false);
+                        setPinInput('');
+                        setFase('identidade');
+                      }}
+                      className="w-full py-4 text-[14px] font-black uppercase relative hover:text-blue-500 text-white-600 tracking-widest"
+                    >
+                      <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-50" />
+                      Sair do Modo Admin
+                    </button>
                   </div>
                 )}
               </div>
@@ -503,56 +757,269 @@ export default function PerfilAdmin() {
             {fase === 'cadastro' && (
               <form onSubmit={handleCadastro} className="w-full max-w-md bg-slate-900/50 border overflow-hidden border-white/5 p-8 rounded-[2.5rem] space-y-6 relative shadow-2xl">
                 <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-50" />
-                <div className="flex items-center gap-4 mb-2"><div className="size-12 bg-emerald-500/10 rounded-2xl flex items-center justify-center text-emerald-500 border border-emerald-500/20"><UserPlus size={24} /></div><h2 className="text-lg font-black uppercase italic tracking-tighter">Novo Integrante</h2></div>
+
+                <div className="flex items-center gap-4 mb-2">
+                  <div className="size-12 bg-emerald-500/10 rounded-2xl flex items-center justify-center text-emerald-500 border border-emerald-500/20">
+                    <UserPlus size={24} />
+                  </div>
+                  <h2 className="text-lg font-black uppercase italic tracking-tighter">Novo Integrante</h2>
+                </div>
+
                 <div className="space-y-4">
-                  <div><label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1 mb-2 block">Nome</label><input name="nome" placeholder="Ex: Lucas Teclas" className="w-full p-4 rounded-xl bg-slate-950 text-white border border-white/5 outline-none focus:border-emerald-500/50 transition-all font-bold placeholder:text-slate-700" required /></div>
-                  <div><label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1 mb-2 block">Função Principal</label>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1 mb-2 block">Nome</label>
+                    <input name="nome" placeholder="Ex: Lucas Teclas" className="w-full p-4 rounded-xl bg-slate-950 text-white border border-white/5 outline-none focus:border-emerald-500/50 transition-all font-bold placeholder:text-slate-700" required />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1 mb-2 block">Função Principal</label>
+
                     {!cadUsarFuncaoCustom ? (
-                      <><select name="funcao" className="w-full p-4 rounded-xl bg-slate-950 text-white border border-white/5 outline-none focus:border-emerald-500/50 font-bold appearance-none" required defaultValue=""><option value="">Selecione...</option>{funcoesDisponiveis.map((op) => (<option key={op} value={op}>{op}</option>))}</select><button type="button" onClick={() => { setCadUsarFuncaoCustom(true); setCadFuncaoCustom(''); }} className="mt-3 inline-flex items-center gap-2 text-[9px] font-black uppercase tracking-widest text-blue-500 hover:text-yellow-400 transition-colors"><Plus size={14} /> Adicionar minha função</button></>
+                      <>
+                        <select name="funcao" className="w-full p-4 rounded-xl bg-slate-950 text-white border border-white/5 outline-none focus:border-emerald-500/50 font-bold appearance-none" required defaultValue="">
+                          <option value="">Selecione...</option>
+                          {funcoesDisponiveis.map((op) => (
+                            <option key={op} value={op}>
+                              {op}
+                            </option>
+                          ))}
+                        </select>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCadUsarFuncaoCustom(true);
+                            setCadFuncaoCustom('');
+                          }}
+                          className="mt-3 inline-flex items-center gap-2 text-[9px] font-black uppercase tracking-widest text-blue-500 hover:text-yellow-400 transition-colors"
+                        >
+                          <Plus size={14} /> Adicionar minha função
+                        </button>
+                      </>
                     ) : (
-                      <><input value={cadFuncaoCustom} onChange={(e) => setCadFuncaoCustom(e.target.value)} placeholder="Digite sua função..." className="w-full p-4 rounded-xl bg-slate-950 text-white border border-white/5 outline-none focus:border-blue-500/50 transition-all font-bold placeholder:text-slate-700" required /><button type="button" onClick={() => { setCadUsarFuncaoCustom(false); setCadFuncaoCustom(''); }} className="mt-3 text-[9px] font-black uppercase tracking-widest text-slate-500 hover:text-white transition-colors">Voltar para lista</button></>
+                      <>
+                        <input value={cadFuncaoCustom} onChange={(e) => setCadFuncaoCustom(e.target.value)} placeholder="Digite sua função..." className="w-full p-4 rounded-xl bg-slate-950 text-white border border-white/5 outline-none focus:border-blue-500/50 transition-all font-bold placeholder:text-slate-700" required />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCadUsarFuncaoCustom(false);
+                            setCadFuncaoCustom('');
+                          }}
+                          className="mt-3 text-[9px] font-black uppercase tracking-widest text-slate-500 hover:text-white transition-colors"
+                        >
+                          Voltar para lista
+                        </button>
+                      </>
                     )}
                   </div>
-                  <div><label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1 mb-3 block">Sub-funções</label><MultiSelectSubfuncoes disponiveis={subfuncoesDisponiveis} selecionadas={subfuncoesSelecionadas} onChange={setSubfuncoesSelecionadas} />{subfuncoesSelecionadas.length > 0 && <button type="button" onClick={() => setSubfuncoesSelecionadas([])} className="mt-3 text-[9px] font-black uppercase tracking-widest text-slate-500 hover:text-white transition-colors">Limpar subfunções</button>}</div>
+
+                  <div>
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1 mb-3 block">Sub-funções</label>
+                    <MultiSelectSubfuncoes disponiveis={subfuncoesDisponiveis} selecionadas={subfuncoesSelecionadas} onChange={setSubfuncoesSelecionadas} />
+                    {subfuncoesSelecionadas.length > 0 && (
+                      <button type="button" onClick={() => setSubfuncoesSelecionadas([])} className="mt-3 text-[9px] font-black uppercase tracking-widest text-slate-500 hover:text-white transition-colors">
+                        Limpar subfunções
+                      </button>
+                    )}
+                  </div>
                 </div>
-                <div className="pt-4 space-y-3"><button type="submit" disabled={loading} className="w-full bg-blue-500/5 text-blue-500 py-5  relative overflow-hidden rounded-2xl font-black uppercase text-[14px] tracking-widest active:scale-95 flex items-center justify-center gap-3 shadow-blue-500/10 hover:text-white transition-all shadow-xl border border-blue-500/20 hover:border-blue-500/40 disabled:opacity-50"><div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-50" />{loading ? <div className="flex items-center justify-center gap-2"><Loader2 className="animate-spin" size={16} /> Sincronizando...</div> : 'Cadastrar e Ativar Perfil'}</button></div>
+
+                <div className="pt-4 space-y-3">
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="w-full bg-blue-500/5 text-blue-500 py-5 relative overflow-hidden rounded-2xl font-black uppercase text-[14px] tracking-widest active:scale-95 flex items-center justify-center gap-3 shadow-blue-500/10 hover:text-white transition-all shadow-xl border border-blue-500/20 hover:border-blue-500/40 disabled:opacity-50"
+                  >
+                    <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-50" />
+                    {loading ? (
+                      <div className="flex items-center justify-center gap-2">
+                        <Loader2 className="animate-spin" size={16} /> Sincronizando...
+                      </div>
+                    ) : (
+                      'Cadastrar e Ativar Perfil'
+                    )}
+                  </button>
+                </div>
               </form>
             )}
 
             {fase === 'identidade' && (
               <div className="w-full max-w-md bg-slate-900 border overflow-hidden border-white/5 p-8 rounded-[2.5rem] shadow-2xl relative">
-                {sucesso && <div className="absolute inset-0 bg-blue-600 flex flex-col items-center justify-center z-10 animate-in fade-in duration-300 rounded-[2.5rem]"><ShieldCheck size={48} className="text-white animate-bounce" /><span className="text-white font-black uppercase text-xs tracking-[0.3em] mt-4">Perfil Ativado!</span></div>}
+                {sucesso && (
+                  <div className="absolute inset-0 bg-blue-600 flex flex-col items-center justify-center z-10 animate-in fade-in duration-300 rounded-[2.5rem]">
+                    <ShieldCheck size={48} className="text-white animate-bounce" />
+                    <span className="text-white font-black uppercase text-xs tracking-[0.3em] mt-4">Perfil Ativado!</span>
+                  </div>
+                )}
+
                 <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-50" />
+
                 <div className="space-y-6">
-                  <div className="relative group"><label className="text-[12px] font-black text-slate-500 uppercase tracking-[0.2em] ml-1 mb-2 block">Membro da Banda</label><select onChange={(e) => handleSelecionar(e.target.value)} value={userAtivo?.id || ''} className="w-full p-5 rounded-2xl bg-slate-950 text-white border border-white/5 outline-none focus:border-blue-500/50 transition-all font-bold appearance-none cursor-pointer"><option value="" disabled>Selecione seu nome...</option>{membros.map((m) => (<option key={m.id} value={m.id}>{m.nome} ({m.funcao})</option>))}</select><ChevronRight className="absolute right-4 bottom-5 text-slate-600 rotate-90 pointer-events-none" size={18} /></div>
+                  <div className="relative group">
+                    <label className="text-[12px] font-black text-slate-500 uppercase tracking-[0.2em] ml-1 mb-2 block">
+                      Membro da Banda
+                    </label>
+
+                    <select
+                      onChange={(e) => handleSelecionar(e.target.value)}
+                      value={userAtivo?.id || ''}
+                      className="w-full p-5 rounded-2xl bg-slate-950 text-white border border-white/5 outline-none focus:border-blue-500/50 transition-all font-bold appearance-none cursor-pointer"
+                    >
+                      <option value="" disabled>
+                        Selecione seu nome...
+                      </option>
+                      {membros.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.nome} ({m.funcao})
+                        </option>
+                      ))}
+                    </select>
+
+                    <ChevronRight className="absolute right-4 bottom-5 text-slate-600 rotate-90 pointer-events-none" size={18} />
+                  </div>
+
                   {userAtivo ? (
                     <div className="p-5 bg-blue-600/5 border border-blue-500/10 rounded-2xl space-y-4">
                       <div className="flex items-center justify-between">
-                        <div><p className="text-[9px] font-black text-blue-500 uppercase tracking-widest mb-1">Acesso Liberado</p><p className="text-white font-black uppercase italic tracking-tight text-lg">{userAtivo.nome}</p>{!editandoAtivo && <p className="text-[10px] text-slate-400 font-bold uppercase">{userAtivo.funcao}{formatSubfuncoes(userAtivo) ? ` + ${formatSubfuncoes(userAtivo)}` : ''}</p>}</div>
+                        <div>
+                          <p className="text-[9px] font-black text-blue-500 uppercase tracking-widest mb-1">Acesso Liberado</p>
+                          <p className="text-white font-black uppercase italic tracking-tight text-lg">{userAtivo.nome}</p>
+                          {!editandoAtivo && (
+                            <p className="text-[10px] text-slate-400 font-bold uppercase">
+                              {userAtivo.funcao}
+                              {formatSubfuncoes(userAtivo) ? ` + ${formatSubfuncoes(userAtivo)}` : ''}
+                            </p>
+                          )}
+                        </div>
+
                         <div className="flex items-center gap-2">
-                          {!editandoAtivo ? (<button onClick={abrirEdicaoAtivo} className="p-3 bg-slate-950 rounded-xl border border-white/5 text-slate-500 hover:text-blue-400 hover:border-blue-500/30 transition-all"><Edit3 size={18} /></button>) : (<><button onClick={salvarEdicaoAtivo} disabled={salvandoEdicao} className="p-3 bg-emerald-500/10 rounded-xl border border-emerald-500/20 text-emerald-400 hover:border-emerald-500/40 transition-all disabled:opacity-50"><Save size={18} /></button><button onClick={cancelarEdicaoAtivo} disabled={salvandoEdicao} className="p-3 bg-slate-950 rounded-xl border border-white/5 text-slate-500 hover:text-white transition-all disabled:opacity-50"><X size={18} /></button></>)}
-                          <button onClick={handleLogout} className="p-3 bg-slate-950 rounded-xl border border-white/5 text-slate-600 hover:text-red-500 hover:border-red-500/30 transition-all"><LogOut size={18} /></button>
+                          {!editandoAtivo ? (
+                            <button onClick={abrirEdicaoAtivo} className="p-3 bg-slate-950 rounded-xl border border-white/5 text-slate-500 hover:text-blue-400 hover:border-blue-500/30 transition-all">
+                              <Edit3 size={18} />
+                            </button>
+                          ) : (
+                            <>
+                              <button
+                                onClick={salvarEdicaoAtivo}
+                                disabled={salvandoEdicao}
+                                className="p-3 bg-emerald-500/10 rounded-xl border border-emerald-500/20 text-emerald-400 hover:border-emerald-500/40 transition-all disabled:opacity-50"
+                              >
+                                <Save size={18} />
+                              </button>
+                              <button
+                                onClick={cancelarEdicaoAtivo}
+                                disabled={salvandoEdicao}
+                                className="p-3 bg-slate-950 rounded-xl border border-white/5 text-slate-500 hover:text-white transition-all disabled:opacity-50"
+                              >
+                                <X size={18} />
+                              </button>
+                            </>
+                          )}
+
+                          <button onClick={handleLogout} className="p-3 bg-slate-950 rounded-xl border border-white/5 text-slate-600 hover:text-red-500 hover:border-red-500/30 transition-all">
+                            <LogOut size={18} />
+                          </button>
                         </div>
                       </div>
+
                       {editandoAtivo && (
                         <div className="space-y-4">
-                          <div><label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1 mb-2 block">Função Principal</label>
+                          <div>
+                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1 mb-2 block">Função Principal</label>
+
                             {!editUsarFuncaoCustom ? (
-                              <><select value={editFuncao} onChange={(e) => setEditFuncao(e.target.value)} disabled={salvandoEdicao} className="w-full p-4 rounded-xl bg-slate-950 text-white border border-white/5 outline-none focus:border-blue-500/50 font-bold appearance-none disabled:opacity-50"><option value="">Selecione...</option>{funcoesDisponiveis.map((op) => (<option key={op} value={op}>{op}</option>))}</select><button type="button" onClick={() => { setEditUsarFuncaoCustom(true); setEditFuncaoCustom(editFuncao || ''); setEditFuncao(''); }} disabled={salvandoEdicao} className="mt-3 inline-flex items-center gap-2 text-[9px] font-black uppercase tracking-widest text-blue-500 hover:text-yellow-400 transition-colors disabled:opacity-50"><Plus size={14} /> Adicionar nova função</button></>
+                              <>
+                                <select
+                                  value={editFuncao}
+                                  onChange={(e) => setEditFuncao(e.target.value)}
+                                  disabled={salvandoEdicao}
+                                  className="w-full p-4 rounded-xl bg-slate-950 text-white border border-white/5 outline-none focus:border-blue-500/50 font-bold appearance-none disabled:opacity-50"
+                                >
+                                  <option value="">Selecione...</option>
+                                  {funcoesDisponiveis.map((op) => (
+                                    <option key={op} value={op}>
+                                      {op}
+                                    </option>
+                                  ))}
+                                </select>
+
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditUsarFuncaoCustom(true);
+                                    setEditFuncaoCustom(editFuncao || '');
+                                    setEditFuncao('');
+                                  }}
+                                  disabled={salvandoEdicao}
+                                  className="mt-3 inline-flex items-center gap-2 text-[9px] font-black uppercase tracking-widest text-blue-500 hover:text-yellow-400 transition-colors disabled:opacity-50"
+                                >
+                                  <Plus size={14} /> Adicionar nova função
+                                </button>
+                              </>
                             ) : (
-                              <><input value={editFuncaoCustom} onChange={(e) => setEditFuncaoCustom(e.target.value)} disabled={salvandoEdicao} placeholder="Digite sua função..." className="w-full p-4 rounded-xl bg-slate-950 text-white border border-white/5 outline-none focus:border-blue-500/50 transition-all font-bold placeholder:text-slate-700 disabled:opacity-50" /><button type="button" onClick={() => { setEditUsarFuncaoCustom(false); setEditFuncao(''); setEditFuncaoCustom(''); }} disabled={salvandoEdicao} className="mt-3 text-[9px] font-black uppercase tracking-widest text-slate-500 hover:text-white transition-colors disabled:opacity-50">Voltar para lista</button></>
+                              <>
+                                <input
+                                  value={editFuncaoCustom}
+                                  onChange={(e) => setEditFuncaoCustom(e.target.value)}
+                                  disabled={salvandoEdicao}
+                                  placeholder="Digite sua função..."
+                                  className="w-full p-4 rounded-xl bg-slate-950 text-white border border-white/5 outline-none focus:border-blue-500/50 transition-all font-bold placeholder:text-slate-700 disabled:opacity-50"
+                                />
+
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditUsarFuncaoCustom(false);
+                                    setEditFuncao('');
+                                    setEditFuncaoCustom('');
+                                  }}
+                                  disabled={salvandoEdicao}
+                                  className="mt-3 text-[9px] font-black uppercase tracking-widest text-slate-500 hover:text-white transition-colors disabled:opacity-50"
+                                >
+                                  Voltar para lista
+                                </button>
+                              </>
                             )}
                           </div>
-                          <div><label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1 mb-3 block">Sub-funções</label>
-                            {!USE_MULTISELECT_SUBFUNCOES ? (<MultiSelectSubfuncoes disponiveis={subfuncoesDisponiveis} selecionadas={editSubfuncoes} onChange={setEditSubfuncoes} />) : (<select multiple value={editSubfuncoes} onChange={(e) => setEditSubfuncoes(readMultiSelectValues(e.currentTarget))} disabled={salvandoEdicao} className="w-full h-48 p-4 rounded-2xl bg-slate-950 text-white border border-white/5 outline-none focus:border-blue-500/50 font-bold disabled:opacity-50">{subfuncoesDisponiveis.map((op) => (<option key={op} value={op}>{op}</option>))}</select>)}
-                            {editSubfuncoes.length > 0 && <button type="button" onClick={() => setEditSubfuncoes([])} disabled={salvandoEdicao} className="mt-3 text-[9px] font-black uppercase tracking-widest text-slate-500 hover:text-white transition-colors disabled:opacity-50">Limpar subfunções</button>}
+
+                          <div>
+                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1 mb-3 block">Sub-funções</label>
+
+                            {!USE_MULTISELECT_SUBFUNCOES ? (
+                              <MultiSelectSubfuncoes disponiveis={subfuncoesDisponiveis} selecionadas={editSubfuncoes} onChange={setEditSubfuncoes} />
+                            ) : (
+                              <select
+                                multiple
+                                value={editSubfuncoes}
+                                onChange={(e) => setEditSubfuncoes(readMultiSelectValues(e.currentTarget))}
+                                disabled={salvandoEdicao}
+                                className="w-full h-48 p-4 rounded-2xl bg-slate-950 text-white border border-white/5 outline-none focus:border-blue-500/50 font-bold disabled:opacity-50"
+                              >
+                                {subfuncoesDisponiveis.map((op) => (
+                                  <option key={op} value={op}>
+                                    {op}
+                                  </option>
+                                ))}
+                              </select>
+                            )}
+
+                            {editSubfuncoes.length > 0 && (
+                              <button type="button" onClick={() => setEditSubfuncoes([])} disabled={salvandoEdicao} className="mt-3 text-[9px] font-black uppercase tracking-widest text-slate-500 hover:text-white transition-colors disabled:opacity-50">
+                                Limpar subfunções
+                              </button>
+                            )}
                           </div>
-                          <div className="pt-1"><p className="text-[9px] font-black uppercase tracking-widest text-slate-600">{salvandoEdicao ? 'Salvando...' : 'Edite e clique em salvar.'}</p></div>
+
+                          <div className="pt-1">
+                            <p className="text-[9px] font-black uppercase tracking-widest text-slate-600">{salvandoEdicao ? 'Salvando...' : 'Edite e clique em salvar.'}</p>
+                          </div>
                         </div>
                       )}
                     </div>
                   ) : (
-                    <div className="p-5 bg-slate-950 border border-dashed border-white/10 rounded-2xl text-center"><p className="text-[12px] font-black text-slate-600 uppercase tracking-widest">Nenhum perfil ativo</p></div>
+                    <div className="p-5 bg-slate-950 border border-dashed border-white/10 rounded-2xl text-center">
+                      <p className="text-[12px] font-black text-slate-600 uppercase tracking-widest">Nenhum perfil ativo</p>
+                    </div>
                   )}
                 </div>
               </div>
@@ -561,7 +1028,11 @@ export default function PerfilAdmin() {
             {fase !== 'admin' && (
               <div className="w-full max-w-md relative overflow-hidden text-center pt-2">
                 <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-50" />
-                <button type="button" onClick={() => setFase(fase === 'cadastro' ? 'identidade' : 'cadastro')} className="w-full bg-blue-500/5 text-blue-500 py-5 rounded-2xl font-black uppercase text-[14px] tracking-widest active:scale-95 flex items-center justify-center gap-3 shadow-blue-500/10 hover:text-white transition-all shadow-xl">
+                <button
+                  type="button"
+                  onClick={() => setFase(fase === 'cadastro' ? 'identidade' : 'cadastro')}
+                  className="w-full bg-blue-500/5 text-blue-500 py-5 rounded-2xl font-black uppercase text-[14px] tracking-widest active:scale-95 flex items-center justify-center gap-3 shadow-blue-500/10 hover:text-white transition-all shadow-xl"
+                >
                   {fase === 'cadastro' ? 'Já é um integrante?\nSelecione seu perfil aqui' : 'É novo por aqui?\nCrie seu perfil agora'}
                 </button>
               </div>
@@ -569,7 +1040,14 @@ export default function PerfilAdmin() {
 
             {fase !== 'admin' && (
               <div className="w-full max-w-md text-center pt-8 opacity-70 hover:opacity-100 transition-opacity">
-                <button onClick={() => { setFase('admin'); setAdminAutenticado(false); setPinInput(''); }} className="w-full bg-blue-500/5 text-white py-5 relative overflow-hidden rounded-2xl font-black uppercase text-[16px] tracking-widest active:scale-95 flex items-center justify-center gap-3 shadow-blue-500/10 hover:text-white transition-all shadow-xl">
+                <button
+                  onClick={() => {
+                    setFase('admin');
+                    setAdminAutenticado(false);
+                    setPinInput('');
+                  }}
+                  className="w-full bg-blue-500/5 text-white py-5 relative overflow-hidden rounded-2xl font-black uppercase text-[16px] tracking-widest active:scale-95 flex items-center justify-center gap-3 shadow-blue-500/10 hover:text-white transition-all shadow-xl"
+                >
                   <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-50" />
                   <ShieldCheck size={16} /> Painel do Líder
                 </button>

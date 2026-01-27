@@ -15,16 +15,22 @@ declare global {
 export default function PushInitializer({ membroId }: PushProps) {
   useEffect(() => {
     if (typeof window === "undefined") return;
-    if (!window.OneSignal) return;
 
+    window.OneSignal = window.OneSignal || [];
     const OneSignal = window.OneSignal;
 
     OneSignal.push(async () => {
       try {
-        if (membroId) {
-          await OneSignal.login(String(membroId));
-          console.log("🔔 OneSignal login:", membroId);
+        if (!membroId) return;
+
+        // 🔐 garante permissão
+        const perm = await OneSignal.Notifications.permission;
+        if (perm !== "granted") {
+          await OneSignal.Notifications.requestPermission();
         }
+
+        await OneSignal.login(String(membroId));
+        console.log("🔔 OneSignal login OK:", membroId);
       } catch (e) {
         console.error("❌ OneSignal login error:", e);
       }

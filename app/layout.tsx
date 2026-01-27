@@ -4,6 +4,7 @@ import "./globals.css";
 import ClientProviders from "./ClientProviders";
 import SubscriptionGuard from "@/components/SubscriptionGuard";
 import PushInitializer from "@/components/PushInitializer";
+import InstallIOSBanner from "@/components/InstallIOSBanner";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -51,8 +52,11 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         ].join(" ")}
       >
         <ClientProviders>
-          {/* ✅ OneSignal init (não registra /sw.js) */}
+          {/* ✅ OneSignal init */}
           <PushInitializer />
+
+          {/* ✅ Banner iOS: ensina instalar pelo Safari + Add to Home */}
+          <InstallIOSBanner />
 
           <SubscriptionGuard>{children}</SubscriptionGuard>
         </ClientProviders>
