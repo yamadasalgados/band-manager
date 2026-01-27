@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import ClientProviders from "./ClientProviders";
 import SubscriptionGuard from "@/components/SubscriptionGuard";
+import PushInitializer from "@/components/PushInitializer";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -51,6 +52,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       >
         <ClientProviders>
           {/* ✅ OneSignal init (não registra /sw.js) */}
+          <PushInitializer />
 
           <SubscriptionGuard>{children}</SubscriptionGuard>
         </ClientProviders>

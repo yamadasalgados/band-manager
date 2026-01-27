@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
 import { useOrg } from '@/contexts/OrgContext';
 import SubscriptionGuard from '@/components/SubscriptionGuard';
+import { sendPush } from '@/lib/push/sendPush';
 
 import {
   Calendar,
@@ -24,6 +25,7 @@ import {
   Gauge,
   Music,
 } from 'lucide-react';
+
 
 // --- HELPERS DE LÓGICA ---
 function isEventToday(evData: string) {
@@ -282,39 +284,77 @@ export default function HomeMembro() {
     }
   }
 
-  async function alternarPresenca(eventoId: string, statusAtual?: string) {
-    if (!perfilAtivo) return alert('Selecione um perfil na engrenagem superior!');
+async function alternarPresenca(eventoId: string, statusAtual?: string) {
+  if (!perfilAtivo) return alert('Selecione um perfil na engrenagem superior!');
 
-    if (org?.status_assinatura !== 'ativo' && org?.status_assinatura !== 'trial') {
-      return alert('Assinatura da banda pendente. Fale com o líder.');
-    }
-
-    const atual = statusAtual || 'confirmado';
-    const novoStatus = atual === 'falta' ? 'confirmado' : 'falta';
-    if (novoStatus === 'falta' && !confirm('Confirmar ausência neste evento?')) return;
-
-    try {
-      setConfirmandoId(eventoId);
-      const { error } = await supabase.from('escalas').upsert(
-        {
-          evento_id: eventoId,
-          membro_id: perfilAtivo.id,
-          status: novoStatus,
-          org_id: org.id,
-        },
-        { onConflict: 'evento_id,membro_id' }
-      );
-
-      if (error) {
-        logSupabaseError('Erro:', error);
-        return;
-      }
-
-      await carregarDashboard();
-    } finally {
-      setConfirmandoId(null);
-    }
+  if (org?.status_assinatura !== 'ativo' && org?.status_assinatura !== 'trial') {
+    return alert('Assinatura da banda pendente. Fale com o líder.');
   }
+
+  const atual = statusAtual || 'confirmado';
+  const novoStatus = atual === 'falta' ? 'confirmado' : 'falta';
+  if (novoStatus === 'falta' && !confirm('Confirmar ausência neste evento?')) return;
+
+  try {
+    setConfirmandoId(eventoId);
+
+    const { error } = await supabase.from('escalas').upsert(
+      {
+        evento_id: eventoId,
+        membro_id: perfilAtivo.id,
+        status: novoStatus,
+        org_id: org.id,
+      },
+      { onConflict: 'evento_id,membro_id' }
+    );
+
+    if (error) {
+      logSupabaseError('Erro:', error);
+      return;
+    }
+
+    // ✅ (Opcional) atualiza UI uma vez
+    await carregarDashboard();
+
+    // 🔔 PUSH DE PRESENÇA (alvos atuais e confiáveis)
+    try {
+      const { data: confirmados, error: e2 } = await supabase
+        .from('escalas')
+        .select('membro_id')
+        .eq('org_id', org.id)
+        .eq('evento_id', eventoId)
+        .eq('status', 'confirmado');
+
+      if (!e2) {
+const membrosIds = (confirmados || [])
+  .map((x: any) => String(x?.membro_id || '').trim())
+  .filter(Boolean)
+  .filter((id: string) => id !== String(perfilAtivo.id));
+
+
+        if (membrosIds.length > 0) {
+          await sendPush({
+            title: 'Presença atualizada',
+            message: `${perfilAtivo.nome} marcou ${novoStatus === 'falta' ? 'falta' : 'presença'} no evento.`,
+            url: `/`,
+            externalUserIds: membrosIds,
+            data: {
+              type: 'presence_update',
+              eventoId,
+              membroId: perfilAtivo.id,
+              status: novoStatus,
+            },
+          });
+        }
+      }
+    } catch (err) {
+      console.error('Erro ao enviar push de presença:', err);
+    }
+  } finally {
+    setConfirmandoId(null);
+  }
+}
+
 
   const FilterPill = ({ k, label }: { k: RangeKey; label: string }) => {
     const isActive = rangeKey === k;
