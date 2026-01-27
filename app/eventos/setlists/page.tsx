@@ -158,27 +158,38 @@ export default function GerenciarSetlistsSemanais() {
     setSetlistTemp(atuais);
   };
 
-  const salvarRepertorioShow = async () => {
-    if (!eventoSelecionado) return;
-    setSalvando(true);
-    try {
-      await supabase.from('evento_repertorio').delete().eq('evento_id', eventoSelecionado.id);
-      if (setlistTemp.length > 0) {
-        const novosItens = setlistTemp.map((m, index) => ({
-          evento_id: eventoSelecionado.id,
-          repertorio_id: m.id,
-          ordem: index + 1,
-        }));
-        await supabase.from('evento_repertorio').insert(novosItens);
-      }
-      setEventoSelecionado(null);
-      await carregarDados();
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setSalvando(false);
+const salvarRepertorioShow = async () => {
+  if (!eventoSelecionado || !org?.id) return;
+
+  setSalvando(true);
+  try {
+    await supabase
+      .from('evento_repertorio')
+      .delete()
+      .eq('evento_id', eventoSelecionado.id);
+
+    if (setlistTemp.length > 0) {
+      const novosItens = setlistTemp.map((m, index) => ({
+        evento_id: eventoSelecionado.id,
+        repertorio_id: m.id,
+        ordem: index + 1,
+      }));
+
+      await supabase.from('evento_repertorio').insert(novosItens);
     }
-  };
+
+    // 🔔 PUSH AQUI (🔥 ponto-chave)
+    await sendPushEventoRepertorio(eventoSelecionado.id, org.id);
+
+    setEventoSelecionado(null);
+    await carregarDados();
+  } catch (e) {
+    console.error(e);
+  } finally {
+    setSalvando(false);
+  }
+};
+
 
   const deletarEvento = async (id: string) => {
     if (!confirm('Excluir evento permanentemente?')) return;
@@ -300,6 +311,55 @@ export default function GerenciarSetlistsSemanais() {
       </div>
     );
   }
+
+  async function sendPushEventoRepertorio(eventoId: string, orgId: string) {
+  try {
+    // 🔹 busca membros confirmados do evento
+    const { data: confs, error } = await supabase
+      .from("escalas")
+      .select("membro_id")
+      .eq("org_id", orgId)
+      .eq("evento_id", eventoId)
+      .eq("status", "confirmado");
+
+    if (error) throw error;
+
+    const ids = (confs || [])
+      .map((x: any) => String(x?.membro_id || "").trim())
+      .filter(Boolean);
+
+    if (!ids.length) {
+      console.warn("Push ignorado: nenhum membro confirmado.");
+      return;
+    }
+
+    const r = await fetch("/api/onesignal/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: "Setlist atualizada 🎵",
+        message: "O repertório do próximo evento foi atualizado.",
+        url: `/eventos`,
+        externalUserIds: ids,
+        data: {
+          kind: "setlist_bulk_update",
+          eventoId,
+        },
+      }),
+    });
+
+    const json = await r.json().catch(() => ({}));
+
+    if (!r.ok || !json?.ok) {
+      console.error("Push setlist semanal falhou:", json);
+    } else {
+      console.log("Push setlist semanal enviado:", json.result);
+    }
+  } catch (err) {
+    console.error("Erro ao enviar push do setlist semanal:", err);
+  }
+}
+
 
   return (
 <SubscriptionGuard {...({ status: org?.status_assinatura } as any)}>  
