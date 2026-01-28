@@ -21,7 +21,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Weekend Loop Backstage",
   description: "Gestão profissional de repertório e escalas.",
-  manifest: "/manifest.json",
+  manifest: "/manifest.webmanifest", // ✅ Verifique se o Next gera como .json ou .webmanifest
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
@@ -36,19 +36,23 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 1,
   userScalable: false,
-  viewportFit: "cover",
+  viewportFit: "cover", // ✅ Essencial para preencher a tela toda no iPhone
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="pt-br" className="dark" suppressHydrationWarning>
+    <html lang="pt-br" className="dark h-full" suppressHydrationWarning>
       <body
         className={[
           geistSans.variable,
           geistMono.variable,
-          "antialiased bg-slate-950 min-h-screen selection:bg-blue-500/30",
-          "w-full max-w-[100vw] overflow-x-hidden",
-          "pt-[env(safe-area-inset-top)]",
+          "antialiased bg-slate-950 selection:bg-blue-500/30",
+          "w-full min-h-[100dvh] overflow-x-hidden", // ✅ min-h-[100dvh] resolve o bug da altura no Safari
+          "flex flex-col",
+          // ✅ Adicionamos paddings dinâmicos para Safe Areas (Notch e Barra Home)
+          "pb-[env(safe-area-inset-bottom)]",
+          "pl-[env(safe-area-inset-left)]",
+          "pr-[env(safe-area-inset-right)]",
         ].join(" ")}
       >
         <ClientProviders>
@@ -58,7 +62,10 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
           {/* ✅ Banner iOS: ensina instalar pelo Safari + Add to Home */}
           <InstallIOSBanner />
 
-          <SubscriptionGuard>{children}</SubscriptionGuard>
+          {/* ✅ O main garante que o conteúdo role se for maior que a tela deitada */}
+          <main className="flex-1 w-full flex flex-col overflow-y-auto overflow-x-hidden pt-[env(safe-area-inset-top)]">
+            <SubscriptionGuard>{children}</SubscriptionGuard>
+          </main>
         </ClientProviders>
       </body>
     </html>
