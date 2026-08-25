@@ -50,7 +50,6 @@ export default function HistoricoEventoDetalhe() {
   const [participantes, setParticipantes] = useState<any[]>([]);
   const [setlist, setSetlist] = useState<any[]>([]);
   const [errMsg, setErrMsg] = useState<string | null>(null);
-  if (!org) return null; // Ou um loader customizado
 
   useEffect(() => {
     async function load() {
@@ -61,24 +60,32 @@ export default function HistoricoEventoDetalhe() {
       setErrMsg(null);
 
       try {
-        const { data: ev, error: evErr } = await supabase
-          .from('eventos')
-          .select(`
-            id,
-            local,
-            data,
-            finalizado,
-            paleta_cores,
-            evento_repertorio(
+        const [eventoResult, escalasResult] = await Promise.all([
+          supabase
+            .from('eventos')
+            .select(`
               id,
-              ordem,
-              repertorio(id, titulo, categoria, tom, bpm)
-            )
-          `)
-          .eq('id', id)
-          .eq('org_id', org.id) // 🔒 SEGURANÇA: Garante que o evento é desta banda
-          .single();
+              local,
+              data,
+              finalizado,
+              paleta_cores,
+              evento_repertorio(
+                id,
+                ordem,
+                repertorio(id, titulo, categoria, tom, bpm)
+              )
+            `)
+            .eq('id', id)
+            .eq('org_id', org.id)
+            .single(),
+          supabase
+            .from('escalas')
+            .select('id, status, membro_id, membros!membro_id(nome, funcao)')
+            .eq('evento_id', id)
+            .eq('status', 'confirmado'),
+        ]);
 
+        const { data: ev, error: evErr } = eventoResult;
         if (evErr) throw evErr;
 
         setEvento(ev);
@@ -95,14 +102,7 @@ export default function HistoricoEventoDetalhe() {
           .sort((a: any, b: any) => a.ordem - b.ordem);
 
         setSetlist(lista);
-
-        const { data: esc } = await supabase
-          .from('escalas')
-          .select('id, status, membro_id, membros!membro_id(nome, funcao)')
-          .eq('evento_id', id)
-          .eq('status', 'confirmado');
-
-        setParticipantes(esc || []);
+        setParticipantes(escalasResult.data || []);
       } catch (e: any) {
         console.error('Erro ao carregar detalhes:', e.message);
         setErrMsg('Não foi possível localizar este evento ou você não tem permissão.');
@@ -112,6 +112,8 @@ export default function HistoricoEventoDetalhe() {
     }
     load();
   }, [id, org?.id]); // ✅ Recarrega se a org mudar
+
+  if (!org) return null;
 
   if (loading) return (
     <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center gap-4">

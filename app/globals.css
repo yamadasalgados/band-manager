@@ -43,12 +43,10 @@ body {
   max-width: 100%;
   overflow-x: hidden;
   
-  /* ✅ AJUSTE IPHONE: Garante que o conteúdo respeite o Notch e a barra inferior */
+  /* Altura resiliente no mobile. As safe areas são aplicadas uma única vez no layout. */
   min-height: 100vh;
   min-height: -webkit-fill-available;
-  min-height: 100dvh; 
-
-  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  min-height: 100dvh;
 }
 
 /* Utilitário para esconder Scrollbar */

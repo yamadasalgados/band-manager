@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import {
   UserPlus,
@@ -22,15 +22,14 @@ import {
   Key,
   ShieldCheck,
 } from 'lucide-react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import OneSignal from 'react-onesignal';
 
 import { useOrg } from '@/contexts/OrgContext';
 import MultiSelectSubfuncoes from '@/components/MultiSelectSubfuncoes';
 import SplashScreen from '@/components/SplashScreen';
-
-const PIN_MESTRE_DEFAULT = '123456';
+import { createAndBindMemberWithInvite, getAuthAccessToken, listJoinableMembers } from '@/lib/deviceIdentity';
+import { createOrgInviteLink } from '@/lib/orgInvite';
 
 const OPCOES_INSTRUMENTOS = [
   'Voz',
@@ -77,7 +76,18 @@ function toArraySubfuncoes(sf: any): string[] {
 
 export default function PerfilAdmin() {
   const router = useRouter();
-  const { orgIdAtivo, loadingOrg, org } = useOrg() as any;
+  const searchParams = useSearchParams();
+  const inviteToken = String(searchParams?.get('invite') || '').trim();
+  const {
+    orgIdAtivo,
+    loadingOrg,
+    org,
+    activeMember,
+    identityMode,
+    identityWarning,
+    bindActiveMember,
+    clearActiveMember,
+  } = useOrg() as any;
 
   const [showSplash, setShowSplash] = useState(true);
   const [loading, setLoading] = useState(false);
@@ -108,94 +118,51 @@ export default function PerfilAdmin() {
 
   const USE_MULTISELECT_SUBFUNCOES = false;
 
-  // ---------- OneSignal (robusto / sem notifyButton pra não quebrar TS) ----------
-  const [oneSignalReady, setOneSignalReady] = useState(false);
-  const oneSignalInitOnceRef = useRef(false);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    if (oneSignalInitOnceRef.current) return;
-    oneSignalInitOnceRef.current = true;
-
-    const appId = process.env.NEXT_PUBLIC_ONESIGNAL_APP_ID;
-    if (!appId) {
-      console.warn('[OneSignal] NEXT_PUBLIC_ONESIGNAL_APP_ID ausente.');
-      return;
-    }
-
-    (async () => {
-      try {
-        // ✅ NÃO passe notifyButton aqui, porque o tipo do pacote exige campos obrigatórios
-        await OneSignal.init({
-          appId,
-          allowLocalhostAsSecureOrigin: true,
-        } as any);
-
-        // Não force pop-up em loop: só pede se ainda não tiver
-        try {
- const hasPermission = await OneSignal.Notifications.permission;
-if (!hasPermission) {
-  await OneSignal.Notifications.requestPermission();
-}
-
-        } catch {}
-
-        setOneSignalReady(true);
-        console.log('[OneSignal] init ok');
-      } catch (e) {
-        console.error('[OneSignal] init error:', e);
-      }
-    })();
-  }, []);
-
-const syncOneSignalLogin = useCallback(
-  async (membroId: string) => {
+  // ---------- OneSignal: usa a única instância global carregada pelo ClientProviders ----------
+  const syncOneSignalLogin = useCallback((membroId: string) => {
     if (!membroId || typeof window === 'undefined') return;
-    if (!oneSignalReady) return;
 
-    try {
-      const hasPermission = await OneSignal.Notifications.permission;
-      if (!hasPermission) {
-        await OneSignal.Notifications.requestPermission();
+    const w = window as any;
+    w.OneSignalDeferred = w.OneSignalDeferred || [];
+    w.OneSignalDeferred.push(async (OneSignal: any) => {
+      try {
+        const hasPermission = await OneSignal.Notifications.permission;
+        if (!hasPermission) {
+          await OneSignal.Notifications.requestPermission();
+        }
+        await OneSignal.login(String(membroId));
+        console.log('[OneSignal] logged as', membroId);
+      } catch (e) {
+        console.error('Erro OneSignal Login:', e);
       }
-
-      await OneSignal.login(String(membroId));
-      console.log('[OneSignal] logged as', membroId);
-    } catch (e) {
-      console.error('Erro OneSignal Login:', e);
-    }
-  },
-  [oneSignalReady] // ✅ deps obrigatórias
-);
+    });
+  }, []);
 
   // ---------------------------------------------------------------------------
 
-  const pinMestreNoBanco = useMemo(() => {
-    const raw = String(org?.pin_acesso || PIN_MESTRE_DEFAULT);
-    const digits = raw.replace(/\D/g, '');
-    return digits.length === 6 ? digits : PIN_MESTRE_DEFAULT;
-  }, [org?.pin_acesso]);
 
   useEffect(() => {
+    if (activeMember?.id) {
+      setUserAtivo(activeMember);
+      setFase('identidade');
+      return;
+    }
+
     try {
       const salvo = localStorage.getItem('usuario_ativo');
       if (salvo) {
         const user = JSON.parse(salvo);
         setUserAtivo(user);
         setFase('identidade');
-        if (user?.id) syncOneSignalLogin(user.id);
       } else {
+        setUserAtivo(null);
         setFase('cadastro');
       }
     } catch {
+      setUserAtivo(null);
       setFase('cadastro');
     }
-  }, [syncOneSignalLogin]);
-
-  useEffect(() => {
-    if (!oneSignalReady) return;
-    if (userAtivo?.id) syncOneSignalLogin(userAtivo.id);
-  }, [oneSignalReady, userAtivo?.id, syncOneSignalLogin]);
+  }, [activeMember]);
 
   useEffect(() => {
     if (!org) return;
@@ -211,43 +178,67 @@ const syncOneSignalLogin = useCallback(
       setMembros([]);
       return;
     }
+
     const { data, error } = await supabase
       .from('membros')
-      .select('*')
+      .select('id,nome,funcao,subfuncao,org_id')
       .eq('org_id', orgIdAtivo)
       .order('nome');
-    if (error) return;
-    setMembros(data || []);
-  }, [orgIdAtivo, loadingOrg]);
+
+    if (!error) {
+      setMembros(data || []);
+      return;
+    }
+
+    // Um aparelho ainda não vinculado não pode mais ler a tabela membros.
+    // O convite protegido expõe somente os dados mínimos necessários para a entrada.
+    if (inviteToken) {
+      try {
+        const joinable = await listJoinableMembers(orgIdAtivo, inviteToken);
+        setMembros(joinable || []);
+        return;
+      } catch (joinError) {
+        console.error('Convite inválido:', joinError);
+      }
+    }
+
+    setMembros([]);
+  }, [inviteToken, orgIdAtivo, loadingOrg]);
 
   useEffect(() => {
     if (!loadingOrg) {
       carregarMembros().finally(() => {
-        setTimeout(() => setShowSplash(false), 500);
+        setShowSplash(false);
       });
     }
   }, [loadingOrg, carregarMembros]);
 
-  const handleSelecionar = (id: string) => {
+  const handleSelecionar = async (id: string) => {
     if (!id) return;
     const usuario = membros.find((m) => m.id === id);
     if (!usuario) return;
 
-    setUserAtivo(usuario);
-    localStorage.setItem('usuario_ativo', JSON.stringify(usuario));
-    syncOneSignalLogin(usuario.id);
+    setLoading(true);
+    try {
+      const normalizado = { ...usuario, org_id: usuario.org_id || orgIdAtivo };
+      setUserAtivo(normalizado);
+      await bindActiveMember(normalizado, inviteToken || null);
+      syncOneSignalLogin(usuario.id);
 
-    setEditandoAtivo(false);
-    setEditFuncao('');
-    setEditSubfuncoes([]);
-    setEditUsarFuncaoCustom(false);
-    setEditFuncaoCustom('');
+      setEditandoAtivo(false);
+      setEditFuncao('');
+      setEditSubfuncoes([]);
+      setEditUsarFuncaoCustom(false);
+      setEditFuncaoCustom('');
 
-    setSucesso(true);
-    setTimeout(() => {
-      setSucesso(false);
-      router.push('/');
-    }, 1500);
+      setSucesso(true);
+      setTimeout(() => {
+        setSucesso(false);
+        router.push('/');
+      }, 900);
+    } finally {
+      setLoading(false);
+    }
   };
 
   async function handleCadastro(e: React.FormEvent<HTMLFormElement>) {
@@ -279,17 +270,43 @@ const syncOneSignalLogin = useCallback(
       org_id: orgIdAtivo,
     };
 
-    const { data, error } = await supabase.from('membros').insert([dados]).select().single();
+    let data: any = null;
 
-    if (error) {
-      console.error('Erro ao cadastrar:', error);
-      alert('Erro ao cadastrar.');
-      setLoading(false);
-      return;
+    if (inviteToken) {
+      try {
+        data = await createAndBindMemberWithInvite({
+          orgId: orgIdAtivo,
+          inviteToken,
+          nome: dados.nome,
+          funcao: dados.funcao,
+          whatsapp: dados.whatsapp,
+          subfuncao: dados.subfuncao,
+        });
+      } catch (error) {
+        console.error('Erro ao cadastrar pelo convite:', error);
+        alert('Convite inválido/expirado ou erro ao cadastrar. Peça um novo link ao líder.');
+        setLoading(false);
+        return;
+      }
+    } else {
+      const result = await supabase
+        .from('membros')
+        .insert([dados])
+        .select('id,nome,funcao,subfuncao,org_id')
+        .single();
+
+      if (result.error) {
+        console.error('Erro ao cadastrar:', result.error);
+        alert('Erro ao cadastrar. Entre novamente na banda ou use um link de convite atualizado.');
+        setLoading(false);
+        return;
+      }
+      data = result.data;
+      await bindActiveMember(data);
     }
 
     setUserAtivo(data);
-    localStorage.setItem('usuario_ativo', JSON.stringify(data));
+    if (inviteToken) await bindActiveMember(data, inviteToken);
     syncOneSignalLogin(data.id);
 
     await carregarMembros();
@@ -307,12 +324,16 @@ const syncOneSignalLogin = useCallback(
   }
 
   const handleLogout = async () => {
-    localStorage.removeItem('usuario_ativo');
-    localStorage.removeItem('usuario_ativo_id');
-    localStorage.removeItem('perfil_id');
+    await clearActiveMember();
 
     try {
-      if (oneSignalReady) await OneSignal.logout();
+      const w = window as any;
+      w.OneSignalDeferred = w.OneSignalDeferred || [];
+      w.OneSignalDeferred.push(async (OneSignal: any) => {
+        try {
+          await OneSignal.logout();
+        } catch {}
+      });
     } catch {}
 
     setUserAtivo(null);
@@ -390,14 +411,14 @@ const syncOneSignalLogin = useCallback(
     setSalvandoEdicao(true);
     try {
       const payload = { funcao: funcaoFinal, subfuncao: editSubfuncoes };
-      const { data, error } = await supabase.from('membros').update(payload).eq('id', userAtivo.id).select('*');
+      const { data, error } = await supabase.from('membros').update(payload).eq('id', userAtivo.id).select('id,nome,funcao,subfuncao,org_id').single();
       if (error) throw error;
 
-      const membroAtualizado = data?.[0];
+      const membroAtualizado = data;
       if (!membroAtualizado) throw new Error('Não foi possível atualizar o membro.');
 
       setUserAtivo(membroAtualizado);
-      localStorage.setItem('usuario_ativo', JSON.stringify(membroAtualizado));
+      await bindActiveMember(membroAtualizado);
       setMembros((prev) => prev.map((m) => (m.id === membroAtualizado.id ? membroAtualizado : m)));
 
       cancelarEdicaoAtivo();
@@ -421,9 +442,15 @@ const syncOneSignalLogin = useCallback(
 
     try {
       setLoading(true);
+      const accessToken = await getAuthAccessToken();
+      if (!accessToken) throw new Error('Sessão Auth não disponível.');
+
       const res = await fetch('/api/org/verify-pin', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
         body: JSON.stringify({ orgId: orgIdAtivo, pin: onlyDigits }),
       });
       const json = await res.json().catch(() => null);
@@ -478,7 +505,7 @@ const syncOneSignalLogin = useCallback(
       if (error) throw error;
 
       if (userAtivo?.id === membroId) {
-        localStorage.removeItem('usuario_ativo');
+        await clearActiveMember();
         setUserAtivo(null);
         setEditandoAtivo(false);
       }
@@ -489,14 +516,15 @@ const syncOneSignalLogin = useCallback(
     }
   };
 
-  const copiarLinkConvite = () => {
+  const copiarLinkConvite = async () => {
+    if (!orgIdAtivo) return;
     try {
-      const link = `${window.location.origin}/perfil?org=${orgIdAtivo}`;
-      navigator.clipboard.writeText(link);
+      const link = await createOrgInviteLink(orgIdAtivo);
+      await navigator.clipboard.writeText(link);
       setCopiadoLink(true);
       setTimeout(() => setCopiadoLink(false), 2000);
-    } catch {
-      alert('Não foi possível copiar automaticamente.');
+    } catch (e: any) {
+      alert(e?.message || 'Não foi possível gerar o convite protegido.');
     }
   };
 
@@ -524,7 +552,20 @@ const syncOneSignalLogin = useCallback(
           </div>
         )}
 
-        {!loadingOrg && orgIdAtivo && (
+        {!loadingOrg && orgIdAtivo && !org && (
+          <div className="w-full max-w-md p-6 bg-red-500/10 border border-red-500/20 rounded-[2rem] text-center space-y-4">
+            <AlertTriangle className="mx-auto text-red-400" size={40} />
+            <div>
+              <h2 className="text-lg font-black text-red-300 uppercase italic">Convite antigo ou inválido</h2>
+              <p className="text-xs font-bold text-slate-400 mt-2">Peça ao líder um novo link protegido ou entre pela tela “Acessar Minha Banda”.</p>
+            </div>
+            <Link href="/registrar-banda" className="inline-block bg-slate-900 text-white px-6 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest border border-white/10 hover:bg-slate-800 transition-colors">
+              Acessar Minha Banda
+            </Link>
+          </div>
+        )}
+
+        {!loadingOrg && orgIdAtivo && org && (
           <>
             <div className="w-full max-w-md px-4">
               <header className="w-full mx-w-md flex items-center justify-between mb-8 pt-4">
@@ -680,7 +721,7 @@ const syncOneSignalLogin = useCallback(
 
                       <div className="bg-slate-950 p-4 rounded-xl flex items-center justify-between gap-3 border border-white/5">
                         <code className="text-l font-mono text-gray-300 truncate italic">
-                          .../perfil?org={String(orgIdAtivo).slice(0, 8)}
+                          Convite protegido • {String(orgIdAtivo).slice(0, 8)}…
                         </code>
                         <button onClick={copiarLinkConvite} className="p-2 bg-slate-900 rounded-lg border border-white/10">
                           {copiadoLink ? <Check size={16} className="text-emerald-500" /> : <Copy size={16} className="text-slate-400" />}
@@ -853,6 +894,36 @@ const syncOneSignalLogin = useCallback(
                 )}
 
                 <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-50" />
+
+                <div className="mb-5 flex items-center justify-between gap-3 rounded-2xl border border-white/5 bg-slate-950/60 px-4 py-3">
+                  <div>
+                    <p className="text-[8px] font-black uppercase tracking-[0.18em] text-slate-600">Identidade deste aparelho</p>
+                    <p className="mt-1 text-[10px] font-black uppercase tracking-wider text-slate-300">
+                      {identityMode === 'auth'
+                        ? 'Supabase Auth conectado'
+                        : identityMode === 'legacy'
+                          ? 'Compatibilidade local'
+                          : 'Aguardando perfil'}
+                    </p>
+                  </div>
+                  <span
+                    className={`shrink-0 rounded-lg border px-2.5 py-1 text-[8px] font-black uppercase tracking-widest ${
+                      identityMode === 'auth'
+                        ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400'
+                        : identityMode === 'legacy'
+                          ? 'border-yellow-500/20 bg-yellow-500/10 text-yellow-400'
+                          : 'border-white/10 bg-white/5 text-slate-500'
+                    }`}
+                  >
+                    {identityMode === 'auth' ? 'Vinculado' : identityMode === 'legacy' ? 'Legado' : 'Local'}
+                  </span>
+                </div>
+
+                {identityWarning && (
+                  <div className="mb-5 rounded-2xl border border-yellow-500/15 bg-yellow-500/5 px-4 py-3 text-[9px] font-bold leading-relaxed text-yellow-200/80">
+                    {identityWarning}
+                  </div>
+                )}
 
                 <div className="space-y-6">
                   <div className="relative group">

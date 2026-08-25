@@ -2,7 +2,8 @@
 
 import { useSearchParams, useRouter } from 'next/navigation';
 import { Copy, Check, ArrowRight, ShieldCheck, Loader2 } from 'lucide-react';
-import { useEffect, useMemo, useState, Suspense } from 'react';
+import { useEffect, useState, Suspense } from 'react';
+import { createOrgInviteLink } from '@/lib/orgInvite';
 
 function ConteudoSucesso() {
   const router = useRouter();
@@ -11,15 +12,23 @@ function ConteudoSucesso() {
 
   const [origin, setOrigin] = useState<string>('');
   const [copiado, setCopiado] = useState(false);
+  const [linkMembros, setLinkMembros] = useState('');
 
   useEffect(() => {
     setOrigin(window.location.origin);
   }, []);
 
-  // ✅ Link aponta para /perfil, onde o contexto lê o ?org= e conecta o membro
-  const linkMembros = useMemo(() => {
-    if (!origin || !orgId) return '';
-    return `${origin}/perfil?org=${encodeURIComponent(orgId)}`;
+  useEffect(() => {
+    if (!origin || !orgId) return;
+    let alive = true;
+    createOrgInviteLink(orgId)
+      .then((link) => {
+        if (alive) setLinkMembros(link);
+      })
+      .catch((e) => console.error('invite link:', e));
+    return () => {
+      alive = false;
+    };
   }, [origin, orgId]);
 
   const copiarLink = async () => {

@@ -1,3 +1,5 @@
+import { supabase } from '@/lib/supabase';
+
 // lib/push/sendPush.ts
 export type SendPushArgs = {
   title: string;
@@ -16,9 +18,16 @@ export async function sendPush(args: SendPushArgs) {
     data: args.data || undefined,
   };
 
+  const { data: sessionData } = await supabase.auth.getSession();
+  const accessToken = sessionData.session?.access_token;
+  if (!accessToken) throw new Error('Auth necessária para enviar notificações.');
+
   const r = await fetch("/api/onesignal/send", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
     body: JSON.stringify(payload),
   });
 

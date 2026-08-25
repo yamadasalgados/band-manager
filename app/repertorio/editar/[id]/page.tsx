@@ -9,7 +9,6 @@ import {
   ArrowLeft,
   ListOrdered,
   CheckCircle2,
-  Clock,
   Music,
   GitMerge,
   Search,
@@ -18,6 +17,7 @@ import {
   Loader2,
   Pencil,
   RotateCcw,
+  Eye,
 } from 'lucide-react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
@@ -25,6 +25,16 @@ import Link from 'next/link';
 // ✅ Contexto e Segurança
 import { useOrg } from '@/contexts/OrgContext';
 import SubscriptionGuard from '@/components/SubscriptionGuard';
+import SongPreviewModal from '@/components/SongPreviewModal';
+import SongTimingEditor from '@/components/SongTimingEditor';
+import MemberStageNoteEditor from '@/components/MemberStageNoteEditor';
+import SongVersionHistory from '@/components/SongVersionHistory';
+import { mapChordCellChords } from '@/lib/songStage';
+import {
+  archiveCurrentRepertoireVersion,
+  snapshotFingerprint,
+  type SongSnapshotV1,
+} from '@/lib/songVersioning';
 
 type BlocoDB = {
   id: string; // local (temp/import/db)
@@ -56,7 +66,15 @@ export default function EditarMusica() {
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [previewAberto, setPreviewAberto] = useState(false);
   const [membros, setMembros] = useState<any[]>([]);
+  const [editorReady, setEditorReady] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [draftRecovered, setDraftRecovered] = useState(false);
+  const [recoverableDraft, setRecoverableDraft] = useState<{ savedAt: string; snapshot: SongSnapshotV1 } | null>(null);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const baselineFingerprintRef = useRef('');
+  const draftTimerRef = useRef<number | null>(null);
 
   const [mostrarImportar, setMostrarImportar] = useState(false);
   const [musicasCatalogo, setMusicasCatalogo] = useState<any[]>([]);
@@ -192,23 +210,25 @@ export default function EditarMusica() {
     const raw = String(text || '');
     if (!raw.trim() || semitones === 0) return raw;
 
-    // mantém separadores e espaços: divide por grupos (palavras e não-palavras)
-    // Ex: "Am | F G | C/E" -> tokens ["Am"," ","|"," ","F"," ","G"," ","|"," ","C/E"]
-    const tokens = raw.split(/(\s+|\|)/g);
-    return tokens
-      .map((tk) => {
-        if (tk === '|' || /^\s+$/.test(tk)) return tk;
-        // ainda pode vir "Am-" ou "Am," etc → tenta só transpor o miolo
-        // pega primeira “palavra de acorde” até achar um caractere que não faz parte
-        const mm = tk.match(/^([A-Ga-g][#b]?(?:[^A-Ga-g\s|]*)?)(.*)$/);
-        if (!mm) return tk;
+    // Cada compasso continua separado por |. Dentro do compasso, a cifra pro
+    // pode ter vários anchors (Ex: Em@7;Bm@22). Mapeamos acorde por acorde para
+    // preservar as posições na letra durante a transposição.
+    return raw
+      .split('|')
+      .map((cell) => {
+        const trimmed = cell.trim();
+        if (trimmed.includes('@')) {
+          return mapChordCellChords(trimmed, (chord) => transposeChordToken(chord, semitones, preferFlats));
+        }
 
-        const chordPart = mm[1] || '';
-        const tail = mm[2] || '';
-        const transposed = transposeChordToken(chordPart, semitones, preferFlats);
-        return `${transposed}${tail}`;
+        // Compatibilidade com células antigas em que o usuário digitou mais de
+        // um acorde separado por espaço no mesmo compasso.
+        return trimmed
+          .split(/(\s+)/g)
+          .map((token) => (/^\s+$/.test(token) ? token : transposeChordToken(token, semitones, preferFlats)))
+          .join('');
       })
-      .join('');
+      .join(' | ');
   }
 
   const semitonesBetweenKeys = useMemo(() => {
@@ -326,6 +346,53 @@ export default function EditarMusica() {
   const isEditing = !!editingBlockId;
   const cn = (...c: Array<string | false | null | undefined>) => c.filter(Boolean).join(' ');
 
+  const buildEditorSnapshot = useCallback(
+    (
+      base: typeof dadosBase,
+      catalog: BlocoDB[],
+      orderedTimeline: BlocoDB[]
+    ): SongSnapshotV1 => {
+      const normalizedCatalog = catalog.map((block) => ensureClientId(block));
+      const clientIdByLocalId = new Map(
+        normalizedCatalog.map((block) => [String(block.id), String(block.client_id || '')])
+      );
+
+      const blocks = normalizedCatalog.map((block) => ({
+        client_id: String(block.client_id || clientIdByLocalId.get(String(block.id)) || `legacy-${String(block.id)}`),
+        tipo: String(block.tipo || 'Verso'),
+        nome_personalizado: block.nome_personalizado ? String(block.nome_personalizado) : null,
+        letra: block.letra ? String(block.letra) : null,
+        acordes: block.acordes ? String(block.acordes) : null,
+        duracao_compassos: Math.max(1, Number(block.duracao_compassos || 4) || 4),
+      }));
+
+      const timelineClientIds = orderedTimeline
+        .map((item) => String(item.client_id || clientIdByLocalId.get(String(item.id)) || ''))
+        .filter(Boolean);
+
+      return {
+        schema: 1,
+        musica: {
+          titulo: String(base.titulo || ''),
+          artista: String(base.artista || ''),
+          tom: String(base.tom || ''),
+          bpm: String(base.bpm || ''),
+          categoria: String(base.categoria || 'Moderada'),
+          lead_vocal_id: String(base.lead_vocal_id || ''),
+          lead_vocal_custom: String(base.lead_vocal_custom || ''),
+        },
+        blocos: blocks,
+        timeline_client_ids: timelineClientIds,
+      };
+    },
+    []
+  );
+
+  const draftStorageKey = useMemo(
+    () => (org?.id && id ? `band-manager:repertorio-draft:v10:${String(org.id)}:${String(id)}` : ''),
+    [id, org?.id]
+  );
+
   // --- CÁLCULO DE DURAÇÃO ESTIMADA ---
   const duracaoEstimada = useMemo(() => {
     const bpm = parseInt(dadosBase.bpm) || 120;
@@ -346,8 +413,7 @@ export default function EditarMusica() {
         ? []
         : raw
             .split('|')
-            .map((p) => p.trim())
-            .filter(Boolean);
+            .map((p) => p.trim());
 
     const out = Array(Math.max(1, duracao)).fill('');
     for (let i = 0; i < out.length; i++) out[i] = parts[i] || '';
@@ -367,68 +433,154 @@ export default function EditarMusica() {
 
     setLoading(true);
     try {
-      const { data: membrosData } = await supabase
-        .from('membros')
-        .select('id, nome')
-        .eq('org_id', org.id)
-        .order('nome');
-      if (membrosData) setMembros(membrosData);
-
-      const { data: musica } = await supabase
-        .from('repertorio')
-        .select('*')
-        .eq('id', id)
-        .eq('org_id', org.id)
-        .single();
-
-      if (musica) {
-        const tomCarregado = musica.tom || '';
-        setDadosBase({
-          titulo: musica.titulo || '',
-          artista: musica.artista || '',
-          tom: tomCarregado,
-          bpm: musica.bpm?.toString() || '',
-          categoria: musica.categoria || 'Moderada',
-          lead_vocal_id: musica.lead_vocal_id || (musica.lead_vocal_custom ? 'custom' : ''),
-          lead_vocal_custom: musica.lead_vocal_custom || '',
-        });
-
-        // inicializa transposição (from = tom atual)
-        setTransposeUI({ from: tomCarregado, to: tomCarregado });
-        transposeBackupRef.current = null;
-      }
-
-      const { data: blocos } = await supabase.from('musica_blocos').select('*').eq('repertorio_id', id);
-
-      if (blocos) {
-        // ✅ garante client_id em todos
-        const blocosComClient = (blocos as any[]).map((b) => ensureClientId(b as BlocoDB));
-        setBlocosDisponiveis(blocosComClient);
-
-        const { data: estrutura } = await supabase
+      const [membrosRes, musicaRes, blocosRes, estruturaRes] = await Promise.all([
+        supabase
+          .from('membros')
+          .select('id, nome')
+          .eq('org_id', org.id)
+          .order('nome'),
+        supabase
+          .from('repertorio')
+          .select('id,titulo,artista,tom,bpm,categoria,lead_vocal_id,lead_vocal_custom')
+          .eq('id', id)
+          .eq('org_id', org.id)
+          .single(),
+        supabase
+          .from('musica_blocos')
+          .select('id,repertorio_id,client_id,tipo,nome_personalizado,letra,acordes,duracao_compassos')
+          .eq('repertorio_id', id),
+        supabase
           .from('musica_estrutura')
-          .select('bloco_id')
+          .select('bloco_id,posicao')
           .eq('repertorio_id', id)
-          .order('posicao');
+          .order('posicao'),
+      ]);
 
-        if (estrutura) {
-          const timelineMontada = estrutura
-            .map((e: any) => blocosComClient.find((b) => String(b.id) === String(e.bloco_id)))
-            .filter(Boolean) as BlocoDB[];
+      if (membrosRes.error) throw membrosRes.error;
+      if (musicaRes.error) throw musicaRes.error;
+      if (blocosRes.error) throw blocosRes.error;
+      if (estruturaRes.error) throw estruturaRes.error;
 
-          setTimeline(timelineMontada);
+      setMembros(membrosRes.data || []);
+
+      const musica = musicaRes.data;
+      const tomCarregado = musica?.tom || '';
+      const loadedBase = {
+        titulo: musica?.titulo || '',
+        artista: musica?.artista || '',
+        tom: tomCarregado,
+        bpm: musica?.bpm?.toString() || '',
+        categoria: musica?.categoria || 'Moderada',
+        lead_vocal_id: musica?.lead_vocal_id || (musica?.lead_vocal_custom ? 'custom' : ''),
+        lead_vocal_custom: musica?.lead_vocal_custom || '',
+      };
+      setDadosBase(loadedBase);
+      setTransposeUI({ from: tomCarregado, to: tomCarregado });
+      transposeBackupRef.current = null;
+
+      const blocosComClient = ((blocosRes.data || []) as any[]).map((b) => ensureClientId(b as BlocoDB));
+      setBlocosDisponiveis(blocosComClient);
+
+      const blocosPorId = new Map(blocosComClient.map((b) => [String(b.id), b]));
+      const timelineMontada = (estruturaRes.data || [])
+        .map((e: any) => blocosPorId.get(String(e.bloco_id)))
+        .filter(Boolean) as BlocoDB[];
+      setTimeline(timelineMontada);
+
+      const baselineSnapshot = buildEditorSnapshot(loadedBase, blocosComClient, timelineMontada);
+      baselineFingerprintRef.current = snapshotFingerprint(baselineSnapshot);
+      setDirty(false);
+      setDraftRecovered(false);
+      setRecoverableDraft(null);
+
+      if (draftStorageKey) {
+        try {
+          const rawDraft = window.localStorage.getItem(draftStorageKey);
+          const parsed = rawDraft ? JSON.parse(rawDraft) : null;
+          const draftSnapshot = parsed?.snapshot as SongSnapshotV1 | undefined;
+          if (
+            draftSnapshot?.schema === 1 &&
+            snapshotFingerprint(draftSnapshot) !== baselineFingerprintRef.current
+          ) {
+            setRecoverableDraft({
+              savedAt: String(parsed?.savedAt || ''),
+              snapshot: draftSnapshot,
+            });
+          } else if (rawDraft) {
+            window.localStorage.removeItem(draftStorageKey);
+          }
+        } catch {
+          window.localStorage.removeItem(draftStorageKey);
         }
       }
+      setEditorReady(true);
     } catch (error) {
       console.error('Erro ao carregar:', error);
     } finally {
       setLoading(false);
     }
-  }, [id, org?.id]);
+  }, [buildEditorSnapshot, draftStorageKey, id, org?.id]);
 
   useEffect(() => {
     carregarDados();
   }, [carregarDados]);
+
+  const currentSnapshot = useMemo(
+    () => buildEditorSnapshot(dadosBase, blocosDisponiveis, timeline),
+    [blocosDisponiveis, buildEditorSnapshot, dadosBase, timeline]
+  );
+  const currentFingerprint = useMemo(() => snapshotFingerprint(currentSnapshot), [currentSnapshot]);
+
+  // Recuperação local contra refresh/crash. Só persiste quando há mudanças reais.
+  useEffect(() => {
+    if (!editorReady || !draftStorageKey || !baselineFingerprintRef.current) return;
+
+    const nextDirty = currentFingerprint !== baselineFingerprintRef.current;
+    setDirty(nextDirty);
+
+    if (draftTimerRef.current) {
+      window.clearTimeout(draftTimerRef.current);
+      draftTimerRef.current = null;
+    }
+
+    if (!nextDirty) {
+      // Se existe um rascunho antigo aguardando decisão, não o apaga automaticamente.
+      if (!recoverableDraft) window.localStorage.removeItem(draftStorageKey);
+      return;
+    }
+
+    draftTimerRef.current = window.setTimeout(() => {
+      try {
+        window.localStorage.setItem(
+          draftStorageKey,
+          JSON.stringify({ savedAt: new Date().toISOString(), snapshot: currentSnapshot })
+        );
+      } catch {}
+    }, 700);
+
+    return () => {
+      if (draftTimerRef.current) {
+        window.clearTimeout(draftTimerRef.current);
+        draftTimerRef.current = null;
+      }
+    };
+  }, [currentFingerprint, currentSnapshot, draftStorageKey, editorReady, recoverableDraft]);
+
+  useEffect(() => {
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!dirty) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [dirty]);
+
+  const discardDraft = useCallback(() => {
+    if (draftStorageKey) window.localStorage.removeItem(draftStorageKey);
+    setRecoverableDraft(null);
+    setDraftRecovered(false);
+  }, [draftStorageKey]);
 
   // =========================
   // ✅ Importação
@@ -445,13 +597,20 @@ export default function EditarMusica() {
   }
 
   async function importarEstrutura(musicaOrigemId: string) {
-    const { data: blocosOrigem } = await supabase.from('musica_blocos').select('*').eq('repertorio_id', musicaOrigemId);
-    const { data: estruturaOrigem } = await supabase
-      .from('musica_estrutura')
-      .select('bloco_id, posicao')
-      .eq('repertorio_id', musicaOrigemId)
-      .order('posicao');
+    const [blocosRes, estruturaRes] = await Promise.all([
+      supabase
+        .from('musica_blocos')
+        .select('id,repertorio_id,client_id,tipo,nome_personalizado,letra,acordes,duracao_compassos')
+        .eq('repertorio_id', musicaOrigemId),
+      supabase
+        .from('musica_estrutura')
+        .select('bloco_id, posicao')
+        .eq('repertorio_id', musicaOrigemId)
+        .order('posicao'),
+    ]);
 
+    const blocosOrigem = blocosRes.data;
+    const estruturaOrigem = estruturaRes.data;
     if (blocosOrigem && estruturaOrigem) {
       const novosDisponiveis = [...blocosDisponiveis];
 
@@ -513,6 +672,51 @@ export default function EditarMusica() {
     });
   }, []);
 
+  const applySnapshotToEditor = useCallback((snapshot: SongSnapshotV1) => {
+    if (!snapshot || snapshot.schema !== 1) return;
+
+    const restoredBlocks: BlocoDB[] = (snapshot.blocos || []).map((block, index) => ({
+      id: `restore-${Date.now()}-${index}-${Math.random()}`,
+      client_id: String(block.client_id || makeClientId()),
+      tipo: String(block.tipo || 'Verso'),
+      nome_personalizado: block.nome_personalizado || null,
+      letra: block.letra || null,
+      acordes: block.acordes || null,
+      duracao_compassos: Math.max(1, Number(block.duracao_compassos || 4) || 4),
+    }));
+
+    const blockByClientId = new Map(restoredBlocks.map((block) => [String(block.client_id), block]));
+    const restoredTimeline = (snapshot.timeline_client_ids || [])
+      .map((clientId) => blockByClientId.get(String(clientId)))
+      .filter(Boolean) as BlocoDB[];
+
+    setDadosBase({
+      titulo: String(snapshot.musica?.titulo || ''),
+      artista: String(snapshot.musica?.artista || ''),
+      tom: String(snapshot.musica?.tom || ''),
+      bpm: String(snapshot.musica?.bpm || ''),
+      categoria: String(snapshot.musica?.categoria || 'Moderada'),
+      lead_vocal_id: String(snapshot.musica?.lead_vocal_id || ''),
+      lead_vocal_custom: String(snapshot.musica?.lead_vocal_custom || ''),
+    });
+    setBlocosDisponiveis(restoredBlocks);
+    setTimeline(restoredTimeline);
+    setTransposeUI({ from: String(snapshot.musica?.tom || ''), to: String(snapshot.musica?.tom || '') });
+    transposeBackupRef.current = null;
+    resetEditorParaNovo();
+    setSaveMessage('Versão carregada no editor. Revise e clique em Gravar Arquitetura para confirmar.');
+  }, [resetEditorParaNovo]);
+
+
+  const recoverDraft = useCallback(() => {
+    if (!recoverableDraft) return;
+    applySnapshotToEditor(recoverableDraft.snapshot);
+    setRecoverableDraft(null);
+    setDraftRecovered(true);
+    setSaveMessage('Rascunho recuperado. Revise e grave quando estiver certo.');
+  }, [applySnapshotToEditor, recoverableDraft]);
+
+
   const salvarEdicaoDoBloco = useCallback(() => {
     if (!editingBlockId) return;
 
@@ -573,7 +777,7 @@ export default function EditarMusica() {
 
   const updateAcordeNoCompasso = (idx: number, v: string) => {
     const n = [...blocoAtual.acordes];
-    n[idx] = v.toUpperCase();
+    n[idx] = v;
     setBlocoAtual({ ...blocoAtual, acordes: n });
   };
 
@@ -614,10 +818,30 @@ export default function EditarMusica() {
   // ✅ Salvar música no banco (À PROVA DE DUPLICADOS)
   // =========================
   async function atualizarMusica() {
-    if (!org?.id) return;
+    if (!org?.id || saving) return;
+    if (!dirty) {
+      setSaveMessage('Nenhuma alteração para gravar.');
+      return;
+    }
+
     setSaving(true);
+    setSaveMessage(null);
 
     try {
+      // v10: antes de qualquer mutação destrutiva, tenta arquivar exatamente
+      // o que está salvo no banco neste momento. Se a migration ainda não foi
+      // aplicada, a edição continua funcionando e apenas o histórico fica ausente.
+      try {
+        await archiveCurrentRepertoireVersion({
+          orgId: String(org.id),
+          songId: String(id),
+          reason: draftRecovered ? 'before_save_after_draft_recovery' : 'before_save',
+        });
+      } catch (historyError: any) {
+        console.warn('[v10] Não foi possível criar backup automático:', historyError?.message || historyError);
+        setSaveMessage('Aviso: não foi possível criar o backup v10. A gravação principal continuará.');
+      }
+
       const payload = {
         titulo: dadosBase.titulo,
         artista: dadosBase.artista || null,
@@ -628,17 +852,29 @@ export default function EditarMusica() {
         lead_vocal_custom: dadosBase.lead_vocal_id === 'custom' ? dadosBase.lead_vocal_custom : null,
       };
 
-      // 1) atualiza música
-      await supabase.from('repertorio').update(payload).eq('id', id).eq('org_id', org.id);
+      // 1) atualiza música — agora todos os erros são checados explicitamente.
+      const { error: updateError } = await supabase
+        .from('repertorio')
+        .update(payload)
+        .eq('id', id)
+        .eq('org_id', org.id);
+      if (updateError) throw updateError;
 
       // 2) apaga estrutura e blocos antigos
-      await supabase.from('musica_estrutura').delete().eq('repertorio_id', id);
-      await supabase.from('musica_blocos').delete().eq('repertorio_id', id);
+      const { error: deleteStructureError } = await supabase
+        .from('musica_estrutura')
+        .delete()
+        .eq('repertorio_id', id);
+      if (deleteStructureError) throw deleteStructureError;
+
+      const { error: deleteBlocksError } = await supabase
+        .from('musica_blocos')
+        .delete()
+        .eq('repertorio_id', id);
+      if (deleteBlocksError) throw deleteBlocksError;
 
       // 3) garante que todos blocos do catálogo tenham client_id
       const catalogoComClient = blocosDisponiveis.map((b) => ensureClientId(b));
-
-      // também sincroniza state (opcional, mas ajuda a manter consistente depois)
       setBlocosDisponiveis(catalogoComClient);
 
       // 4) insere blocos com client_id no banco
@@ -665,16 +901,13 @@ export default function EditarMusica() {
       }
 
       // 6) monta estrutura usando client_id
-      //    ⚠️ se na timeline tiver bloco sem client_id (não deveria), tentamos achar no catálogo e usar o dele.
+      const clientIdPorIdLocal = new Map(
+        catalogoComClient.map((b) => [String(b.id), b.client_id ? String(b.client_id) : ''])
+      );
+
       const getClientIdForTimelineItem = (item: BlocoDB) => {
         if (item.client_id) return String(item.client_id);
-
-        // tenta achar no catálogo pelo id local
-        const found = catalogoComClient.find((b) => String(b.id) === String(item.id));
-        if (found?.client_id) return String(found.client_id);
-
-        // fallback final: cria um novo (mas aí não vai achar no map → não entra na estrutura)
-        return '';
+        return clientIdPorIdLocal.get(String(item.id)) || '';
       };
 
       const estrutura = timeline
@@ -687,19 +920,31 @@ export default function EditarMusica() {
             repertorio_id: id,
             bloco_id: realId,
             posicao: index + 1,
+            org_id: org.id,
           };
         })
-        .filter(Boolean) as Array<{ repertorio_id: any; bloco_id: string; posicao: number }>;
+        .filter(Boolean) as Array<{ repertorio_id: any; bloco_id: string; posicao: number; org_id: string }>;
 
       if (estrutura.length > 0) {
         const { error: errEstrutura } = await supabase.from('musica_estrutura').insert(estrutura);
         if (errEstrutura) throw errEstrutura;
       }
 
-      alert('Projeto Salvo!');
+      // A gravação terminou. O rascunho local deixa de ser necessário.
+      if (draftStorageKey) {
+        try {
+          window.localStorage.removeItem(draftStorageKey);
+        } catch {}
+      }
+      baselineFingerprintRef.current = currentFingerprint;
+      setDirty(false);
+      setDraftRecovered(false);
+      setSaveMessage('Projeto salvo e versão anterior protegida.');
+
+      // Mantém o fluxo atual do app: volta ao repertório após salvar.
       router.push('/repertorio');
     } catch (err: any) {
-      alert(err?.message || 'Erro ao salvar');
+      setSaveMessage(err?.message || 'Erro ao salvar. O rascunho local foi mantido para recuperação.');
       console.error(err);
     } finally {
       setSaving(false);
@@ -763,8 +1008,14 @@ export default function EditarMusica() {
         )}
 
         {/* HEADER */}
-        <header className="max-w-6xl mx-auto flex justify-between items-center mb-10 pt-4">
-          <Link href="/" className="group block transition-transform active:scale-95">
+        <header className="max-w-[1680px] mx-auto flex justify-between items-center mb-10 pt-4">
+          <Link
+            href="/"
+            onClick={(event) => {
+              if (dirty && !window.confirm('Existem alterações não salvas. Sair mesmo assim?')) event.preventDefault();
+            }}
+            className="group block transition-transform active:scale-95"
+          >
             <div>
               <h2 className="text-blue-500 text-[10px] font-black uppercase tracking-[0.4em] mb-1">{org.nome || 'Banda'}</h2>
               <h1 className="text-3xl font-black italic tracking-tighter uppercase leading-none text-white group-hover:text-slate-200 transition-colors">
@@ -776,14 +1027,50 @@ export default function EditarMusica() {
           </Link>
 
           <button
-            onClick={() => router.back()}
+            onClick={() => {
+              if (dirty && !window.confirm('Existem alterações não salvas. Sair mesmo assim?')) return;
+              router.back();
+            }}
             className="text-blue-500 flex items-center gap-2 font-bold uppercase text-[16px] tracking-widest hover:text-white transition-colors"
           >
             <ArrowLeft size={16} /> Voltar
           </button>
         </header>
 
-        <main className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-10">
+        {recoverableDraft && (
+          <div className="max-w-[1680px] mx-auto mb-6 rounded-[2rem] border border-amber-500/25 bg-amber-500/[0.07] px-5 sm:px-6 py-5 flex flex-col lg:flex-row lg:items-center gap-4">
+            <div className="min-w-0 flex-1">
+              <p className="text-[10px] font-black uppercase tracking-[0.2em] text-amber-300">Rascunho local encontrado</p>
+              <p className="mt-1 text-sm font-bold text-slate-200">
+                Há alterações que não chegaram a ser gravadas no Supabase
+                {recoverableDraft.savedAt
+                  ? ` • ${new Date(recoverableDraft.savedAt).toLocaleString('pt-BR')}`
+                  : ''}.
+              </p>
+              <p className="mt-1 text-[10px] text-slate-500">
+                Recuperar coloca o conteúdo no editor; nada é enviado ao banco até você clicar em Gravar Arquitetura.
+              </p>
+            </div>
+            <div className="flex flex-col sm:flex-row gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={recoverDraft}
+                className="min-h-11 px-5 rounded-xl bg-amber-400 text-slate-950 text-[10px] font-black uppercase tracking-wider active:scale-[0.98]"
+              >
+                Recuperar rascunho
+              </button>
+              <button
+                type="button"
+                onClick={discardDraft}
+                className="min-h-11 px-5 rounded-xl border border-white/10 bg-black/20 text-slate-400 text-[10px] font-black uppercase tracking-wider active:scale-[0.98]"
+              >
+                Descartar
+              </button>
+            </div>
+          </div>
+        )}
+
+        <main className="max-w-[1680px] mx-auto grid grid-cols-1 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)] gap-6 lg:gap-8">
           {/* COLUNA ESQUERDA */}
           <div className="space-y-6">
             {/* 1. DADOS BÁSICOS */}
@@ -798,6 +1085,16 @@ export default function EditarMusica() {
                 className="w-full bg-slate-950/50 p-5 rounded-2xl border border-white/5 focus:border-blue-500 outline-none font-bold text-lg"
                 onChange={(e) => setDadosBase({ ...dadosBase, titulo: e.target.value })}
               />
+
+              <div className="bg-slate-950/50 p-4 rounded-2xl border border-white/5">
+                <span className="text-[10px] font-black text-slate-500 uppercase block mb-1 tracking-widest">Artista</span>
+                <input
+                  value={dadosBase.artista}
+                  placeholder="Ex: Aline Barros"
+                  className="bg-transparent w-full outline-none font-bold text-base"
+                  onChange={(e) => setDadosBase({ ...dadosBase, artista: e.target.value })}
+                />
+              </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="bg-slate-950/50 p-4 rounded-2xl border border-white/5">
@@ -905,6 +1202,19 @@ export default function EditarMusica() {
               </div>
 
               <div className="bg-slate-950/50 p-4 rounded-2xl border border-white/5">
+                <span className="text-[10px] font-black text-slate-500 uppercase block mb-1 tracking-widest">Categoria</span>
+                <select
+                  value={dadosBase.categoria}
+                  className="w-full bg-transparent outline-none font-bold text-sm"
+                  onChange={(e) => setDadosBase({ ...dadosBase, categoria: e.target.value })}
+                >
+                  <option value="Rápida" className="bg-slate-900">Rápida</option>
+                  <option value="Moderada" className="bg-slate-900">Moderada</option>
+                  <option value="Lenta" className="bg-slate-900">Lenta</option>
+                </select>
+              </div>
+
+              <div className="bg-slate-950/50 p-4 rounded-2xl border border-white/5">
                 <span className="text-xs font-black text-slate-500 uppercase block mb-2 tracking-widest">Leading vocal</span>
                 <select
                   value={dadosBase.lead_vocal_id}
@@ -960,7 +1270,7 @@ export default function EditarMusica() {
               </div>
 
               <div className="flex gap-2 overflow-x-auto pb-4 no-scrollbar relative">
-                {['Intro', 'Verso', 'Pré-Refrão', 'Refrão', 'Ponte', 'Idioma', 'Break'].map((t) => {
+                {['Intro', 'Verso', 'Pré-Refrão', 'Refrão', 'Ponte', 'Solo', 'Idioma', 'Break', 'Final'].map((t) => {
                   const isActive = blocoAtual.tipo === t;
                   return (
                     <button
@@ -990,45 +1300,13 @@ export default function EditarMusica() {
                 />
               </div>
 
-              <div className="space-y-3 bg-slate-950/30 p-4 rounded-2xl border border-white/5">
-                <div className="flex justify-between text-[14px] font-black uppercase text-slate-500">
-                  <span className="flex items-center gap-2">
-                    <Clock size={12} /> Extensão
-                  </span>
-                  <span className="text-yellow-500">{blocoAtual.duracao_compassos} Compassos</span>
-                </div>
-                <input
-                  type="range"
-                  min="1"
-                  max="16"
-                  step="1"
-                  value={blocoAtual.duracao_compassos}
-                  onChange={(e) => handleCompassoChange(parseInt(e.target.value))}
-                  className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-yellow-500"
-                />
-              </div>
-
-              <div className="grid grid-cols-4 gap-2">
-                {blocoAtual.acordes.map((acorde, idx) => (
-                  <div key={idx} className="relative">
-                    <input
-                      value={acorde}
-                      onChange={(e) => updateAcordeNoCompasso(idx, e.target.value)}
-                      className="w-full bg-slate-950 p-3 rounded-xl outline-none text-center font-mono font-black text-yellow-500 border border-white/5 focus:border-yellow-500/50 text-xs"
-                      placeholder="-"
-                    />
-                    <span className="absolute -top-1.5 left-2 text-[11px] font-black text-slate-600 bg-slate-900 px-1 rounded">
-                      C.{idx + 1}
-                    </span>
-                  </div>
-                ))}
-              </div>
-
-              <textarea
-                value={blocoAtual.letra}
-                placeholder="Letra do bloco..."
-                className="w-full bg-slate-950/50 p-5 rounded-2xl outline-none border border-white/5 h-24 text-sm focus:border-yellow-500/30 transition-all"
-                onChange={(e) => setBlocoAtual({ ...blocoAtual, letra: e.target.value })}
+              <SongTimingEditor
+                duration={blocoAtual.duracao_compassos}
+                chords={blocoAtual.acordes}
+                lyrics={blocoAtual.letra}
+                onDurationChange={handleCompassoChange}
+                onChordChange={updateAcordeNoCompasso}
+                onLyricsChange={(value) => setBlocoAtual((prev) => ({ ...prev, letra: value }))}
               />
 
               <button
@@ -1208,25 +1486,79 @@ export default function EditarMusica() {
                 <Timer size={12} /> Duração Estimada: {duracaoEstimada}
               </div>
 
+              {/* PREVIEW DE ANDAMENTO */}
+              <button
+                type="button"
+                onClick={() => setPreviewAberto(true)}
+                disabled={timeline.length === 0}
+                className="w-full bg-yellow-500/5 border border-yellow-500/20 text-yellow-400 py-4 rounded-2xl font-black uppercase text-[13px] tracking-[0.16em] active:scale-95 flex items-center justify-center gap-3 hover:border-yellow-500/50 hover:text-yellow-300 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                <Eye size={18} /> Preview de andamento
+              </button>
+
+              {/* MODO ENSAIO — usa o mesmo renderer do Preview e Live */}
+              <Link
+                href={`/ensaio/${String(id)}`}
+                className="w-full bg-emerald-500/5 border border-emerald-500/20 text-emerald-400 py-4 rounded-2xl font-black uppercase text-[13px] tracking-[0.16em] active:scale-95 flex items-center justify-center gap-3 hover:border-emerald-500/50 hover:text-emerald-300 transition-all"
+              >
+                <Music size={18} /> Abrir modo ensaio
+              </Link>
+
+              {/* NOTA PESSOAL DO INTEGRANTE PARA O PALCO */}
+              {org?.id && id && (
+                <MemberStageNoteEditor orgId={String(org.id)} songId={String(id)} />
+              )}
+
+              {/* HISTÓRICO / RESTORE — v10 */}
+              {org?.id && id && (
+                <SongVersionHistory
+                  orgId={String(org.id)}
+                  songId={String(id)}
+                  dirty={dirty}
+                  onRestore={applySnapshotToEditor}
+                />
+              )}
+
               {/* BOTÃO FINALIZAR */}
               <button
                 onClick={atualizarMusica}
-                disabled={saving}
-                className="w-full bg-blue-500/5 border-blue-500/20 text-blue-500 py-5 rounded-2xl font-black uppercase text-[14px] tracking-[0.2em] tracking-widest active:scale-95 flex items-center justify-center gap-3 hover:border-blue-500/40 shadow-blue-500/10 hover:text-white transition-all border border-yellow-500/20 shadow-xl"
+                disabled={saving || !dirty}
+                className="w-full bg-blue-500/5 border-blue-500/20 text-blue-500 py-5 rounded-2xl font-black uppercase text-[14px] tracking-[0.2em] tracking-widest active:scale-95 flex items-center justify-center gap-3 hover:border-blue-500/40 shadow-blue-500/10 hover:text-white transition-all border border-yellow-500/20 shadow-xl disabled:opacity-35 disabled:cursor-not-allowed disabled:active:scale-100"
               >
                 {saving ? (
                   <>
                     <Loader2 className="animate-spin" size={20} /> GRAVANDO...
                   </>
-                ) : (
+                ) : dirty ? (
                   <>
                     <Save size={20} /> Gravar Arquitetura
                   </>
+                ) : (
+                  <>
+                    <CheckCircle2 size={20} /> Tudo salvo
+                  </>
                 )}
               </button>
+
+              <div className="min-h-5 text-center">
+                {dirty && (
+                  <p className="text-[9px] font-black uppercase tracking-[0.18em] text-amber-300/80">
+                    Alterações não salvas • cópia local automática ativa
+                  </p>
+                )}
+                {saveMessage && <p className="mt-1 text-[10px] font-bold text-slate-400">{saveMessage}</p>}
+              </div>
             </section>
           </div>
         </main>
+
+        <SongPreviewModal
+          open={previewAberto}
+          onClose={() => setPreviewAberto(false)}
+          titulo={dadosBase.titulo || 'Música sem título'}
+          bpm={parseInt(dadosBase.bpm) || 120}
+          timeline={timeline}
+        />
       </div>
     </SubscriptionGuard>
   );

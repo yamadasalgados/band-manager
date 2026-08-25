@@ -12,6 +12,7 @@ import { useRouter } from 'next/navigation';
 // ✅ IMPORT CORRIGIDO
 import { useOrg } from '@/contexts/OrgContext';
 import SubscriptionGuard from '@/components/SubscriptionGuard';
+import { createOrgInviteLink } from '@/lib/orgInvite';
 
 function slugify(input: string) {
   return String(input || '')
@@ -31,6 +32,7 @@ export default function ConfiguracoesPage() {
 
   const [loading, setLoading] = useState(false);
   const [copiado, setCopiado] = useState(false);
+  const [linkConvite, setLinkConvite] = useState('');
   
   // Estados do formulário
   const [nome, setNome] = useState('');
@@ -59,7 +61,7 @@ export default function ConfiguracoesPage() {
           slug: novoSlug 
         })
         .eq('id', org.id)
-        .select()
+        .select('id,nome,slug,status_assinatura,data_expiracao,user_id')
         .single();
 
       if (error) throw error;
@@ -77,13 +79,17 @@ export default function ConfiguracoesPage() {
     }
   };
 
-  const copiarConvite = () => {
+  const copiarConvite = async () => {
     if (!org?.id) return;
-    // ✅ Gera link clicável para facilitar a vida do líder
-    const link = `${window.location.origin}/perfil?org=${org.id}`;
-    navigator.clipboard.writeText(link);
-    setCopiado(true);
-    setTimeout(() => setCopiado(false), 2000);
+    try {
+      const link = linkConvite || (await createOrgInviteLink(org.id));
+      setLinkConvite(link);
+      await navigator.clipboard.writeText(link);
+      setCopiado(true);
+      setTimeout(() => setCopiado(false), 2000);
+    } catch (e: any) {
+      alert(e?.message || 'Não foi possível gerar o convite protegido.');
+    }
   };
 
   if (loadingOrg) return (
@@ -188,7 +194,7 @@ export default function ConfiguracoesPage() {
                 <div className="flex items-center gap-3 overflow-hidden">
                     <LinkIcon size={16} className="text-slate-600 shrink-0" />
                     <code className="text-slate-400 text-xs font-mono truncate">
-                    {typeof window !== 'undefined' ? `${window.location.origin}/perfil?org=${org.id}` : 'Carregando link...'}
+                    {linkConvite || 'Convite protegido • clique em copiar para gerar'}
                     </code>
                 </div>
                 <button 

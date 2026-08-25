@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useOrg } from '@/contexts/OrgContext';
+import { ensureDeviceAuth, getAuthAccessToken } from '@/lib/deviceIdentity';
 
 function slugify(input: string) {
   return (
@@ -29,7 +30,7 @@ function slugify(input: string) {
 
 export default function RegistrarBanda() {
   const router = useRouter();
-  const { setOrgIdAtivo } = useOrg();
+  const { setOrgIdAtivo, setOrg, clearActiveMember } = useOrg();
 
   const [loading, setLoading] = useState(false);
   const [modo, setModo] = useState<'registro' | 'login'>('registro');
@@ -47,7 +48,7 @@ export default function RegistrarBanda() {
     if (!bloqueadoAte) return;
 
     const tick = () => {
-      const restante = Math.ceil((bloqueadoAte - Date.now()) / 100000);
+      const restante = Math.ceil((bloqueadoAte - Date.now()) / 1000);
       if (restante <= 0) {
         setBloqueadoAte(null);
         setTentativas(0);
@@ -58,7 +59,7 @@ export default function RegistrarBanda() {
     };
 
     tick();
-    const interval = setInterval(tick, 100000);
+    const interval = setInterval(tick, 1000);
     return () => clearInterval(interval);
   }, [bloqueadoAte]);
 
@@ -68,7 +69,7 @@ export default function RegistrarBanda() {
 
     if (!emailLider.trim()) return;
     if (modo === 'registro' && !nomeBanda.trim()) return;
-    if (modo === 'login' && pinLider.replace(/\D/g, '').length !== 6) {
+    if (pinLider.replace(/\D/g, '').length !== 6) {
       alert('Digite um PIN de 6 números.');
       return;
     }
@@ -76,6 +77,14 @@ export default function RegistrarBanda() {
     setLoading(true);
 
     try {
+      const auth = await ensureDeviceAuth();
+      if (!auth.user) {
+        throw new Error(
+          auth.error?.message ||
+            'Ative Anonymous Sign-Ins no Supabase Authentication antes de continuar.'
+        );
+      }
+
       if (modo === 'registro') {
         const slug = slugify(nomeBanda);
 
@@ -85,55 +94,60 @@ export default function RegistrarBanda() {
             {
               nome: nomeBanda.trim(),
               slug,
-              email_admin: emailLider.trim(),
+              email_admin: emailLider.trim().toLowerCase(),
               status_assinatura: 'trial',
               pin_acesso: pinLider.trim(),
-              // pin_acesso: ... (opcional) -> se o banco tem default, não precisa setar
+              user_id: auth.user.id,
             },
           ])
-          .select('id')
+          .select('id,nome,slug,status_assinatura,data_expiracao,user_id')
           .single();
 
         if (error) throw error;
 
         setOrgIdAtivo(org.id);
-        router.push(`/registrar-banda/analise`);
+        setOrg(org as any);
+        router.push(`/registrar-banda/sucesso?id=${encodeURIComponent(org.id)}`);
         return;
       }
 
-      // ✅ LOGIN COM PROTEÇÃO (3 tentativas -> bloqueia 30s)
+      // Login não consulta mais email_admin/pin_acesso diretamente do navegador.
       const pinLimpo = pinLider.replace(/\D/g, '').slice(0, 6);
+      const accessToken = await getAuthAccessToken();
+      if (!accessToken) throw new Error('Sessão Auth não disponível.');
 
-      const { data: org, error } = await supabase
-        .from('organizacoes')
-        .select('id')
-        .eq('email_admin', emailLider.trim())
-        .eq('pin_acesso', pinLimpo)
-        .maybeSingle();
+      const res = await fetch('/api/org/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ email: emailLider.trim(), pin: pinLimpo }),
+      });
+      const json = await res.json().catch(() => null);
 
-      if (error) throw error;
-
-      if (!org) {
+      if (!res.ok || !json?.ok || !json?.org?.id) {
         const novasTentativas = tentativas + 1;
         setTentativas(novasTentativas);
 
         if (novasTentativas >= 3) {
-          const tempoBloqueio = Date.now() + 300_000;
+          const tempoBloqueio = Date.now() + 30_000;
           setBloqueadoAte(tempoBloqueio);
-          setSegundosRestantes(30000);
-          alert('Muitas tentativas incorretas. Aguarde 30000 segundos.');
+          setSegundosRestantes(30);
+          alert('Muitas tentativas incorretas. Aguarde 30 segundos.');
         } else {
           alert(`E-mail ou PIN incorretos. Tentativa ${novasTentativas} de 3.`);
         }
         return;
       }
 
-      // ✅ Sucesso
       setTentativas(0);
       setBloqueadoAte(null);
       setSegundosRestantes(0);
 
-      setOrgIdAtivo(org.id);
+      await clearActiveMember();
+      setOrgIdAtivo(json.org.id);
+      setOrg(json.org);
       router.push(`/`);
     } catch (err: any) {
       console.error(err);

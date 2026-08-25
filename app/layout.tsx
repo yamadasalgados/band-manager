@@ -3,7 +3,6 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import ClientProviders from "./ClientProviders";
 import SubscriptionGuard from "@/components/SubscriptionGuard";
-import PushInitializer from "@/components/PushInitializer";
 import InstallIOSBanner from "@/components/InstallIOSBanner";
 
 const geistSans = Geist({
@@ -34,8 +33,6 @@ export const viewport: Viewport = {
   themeColor: "#020617",
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1,
-  userScalable: false,
   viewportFit: "cover", // ✅ Essencial para preencher a tela toda no iPhone
 };
 
@@ -56,9 +53,6 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         ].join(" ")}
       >
         <ClientProviders>
-          {/* ✅ OneSignal init */}
-          <PushInitializer />
-
           {/* ✅ Banner iOS: ensina instalar pelo Safari + Add to Home */}
           <InstallIOSBanner />
 

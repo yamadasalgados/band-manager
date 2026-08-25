@@ -9,6 +9,7 @@ import { useRouter } from 'next/navigation';
 // ✅ Contexto e Segurança
 import { useOrg } from '@/contexts/OrgContext';
 import SubscriptionGuard from '@/components/SubscriptionGuard';
+import { getAuthAccessToken } from '@/lib/deviceIdentity';
 
 type Repertorio = {
   id: string;
@@ -55,9 +56,15 @@ const sendPush = useCallback(
         return;
       }
 
+      const accessToken = await getAuthAccessToken();
+      if (!accessToken) return;
+
       const r = await fetch("/api/onesignal/send", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
         body: JSON.stringify({
           title: args.title,
           message: args.message,
@@ -97,41 +104,36 @@ const sendPush = useCallback(
 
     setLoading(true);
     try {
-      // 1) membros da org => externalUserIds
-const { data: confs, error: eM } = await supabase
-  .from("escalas")
-  .select("membro_id")
-  .eq("org_id", org.id)
-  .eq("evento_id", eventoId)
-  .eq("status", "confirmado");
+      const [membrosRes, repertorioRes, setlistRes] = await Promise.all([
+        supabase
+          .from('escalas')
+          .select('membro_id')
+          .eq('org_id', org.id)
+          .eq('evento_id', eventoId)
+          .eq('status', 'confirmado'),
+        supabase
+          .from('repertorio')
+          .select('id,titulo,artista,tom,bpm,categoria')
+          .eq('org_id', org.id)
+          .order('titulo'),
+        supabase
+          .from('evento_repertorio')
+          .select('id, ordem, repertorio(id,titulo,artista,tom,bpm,categoria)')
+          .eq('evento_id', eventoId)
+          .order('ordem', { ascending: true }),
+      ]);
 
-if (eM) throw eM;
+      if (membrosRes.error) throw membrosRes.error;
+      if (repertorioRes.error) throw repertorioRes.error;
+      if (setlistRes.error) throw setlistRes.error;
 
-setMembrosIds(
-  (confs || [])
-    .map((x: any) => String(x?.membro_id || "").trim())
-    .filter(Boolean)
-);
-
-      // 2) repertório
-      const { data: todas, error: e1 } = await supabase
-        .from('repertorio')
-        .select('*')
-        .eq('org_id', org.id)
-        .order('titulo');
-
-      if (e1) throw e1;
-      setRepertorioGeral((todas as any[]) || []);
-
-      // 3) setlist atual
-      const { data: atual, error: e2 } = await supabase
-        .from('evento_repertorio')
-        .select('id, ordem, repertorio(*)')
-        .eq('evento_id', eventoId)
-        .order('ordem', { ascending: true });
-
-      if (e2) throw e2;
-      setSetlistAtual((atual as any[]) || []);
+      setMembrosIds(
+        (membrosRes.data || [])
+          .map((x: any) => String(x?.membro_id || '').trim())
+          .filter(Boolean)
+      );
+      setRepertorioGeral((repertorioRes.data as Repertorio[]) || []);
+      setSetlistAtual((setlistRes.data as unknown as EventoRepertorioRow[]) || []);
     } catch (error) {
       console.error('Erro ao carregar setlist:', error);
     } finally {
@@ -156,30 +158,16 @@ setMembrosIds(
   }, [setlistAtual]);
 
   // =========================
-  // ✅ reordenar setlist no DB (1..N)
-  // =========================
-  const reordenarSetlistNoBanco = useCallback(async (rows: EventoRepertorioRow[]) => {
-    await Promise.all(
-      rows.map((r, idx) =>
-        supabase.from('evento_repertorio').update({ ordem: idx + 1 }).eq('id', r.id)
-      )
-    );
-  }, []);
-
-  // =========================
   // ✅ adicionar música (à prova de duplicados)
   // =========================
   async function adicionarMusica(musicaId: string) {
     if (!org?.id || !eventoId) return;
     if (adicionando || removendo) return;
-
-    // anti-duplicado rápido (front)
     if (setlistRepertorioIds.has(String(musicaId))) return;
 
     setAdicionando(musicaId);
 
     try {
-      // anti-duplicado real (DB)
       const { data: existente, error: e0 } = await supabase
         .from('evento_repertorio')
         .select('id')
@@ -188,35 +176,41 @@ setMembrosIds(
         .maybeSingle();
 
       if (e0) throw e0;
+      if (existente?.id) return;
 
-      if (existente?.id) {
-        await carregarDados();
-        return;
-      }
+      const proximaOrdem =
+        setlistAtual.reduce((max, item) => Math.max(max, Number(item.ordem || 0)), 0) + 1;
 
-      const proximaOrdem = (setlistAtual?.length || 0) + 1;
-
-      const { error } = await supabase.from('evento_repertorio').insert([
-        {
+      const { data: novaRelacao, error } = await supabase
+        .from('evento_repertorio')
+        .insert({
           evento_id: eventoId,
           repertorio_id: musicaId,
           ordem: proximaOrdem,
-        },
-      ]);
+          org_id: org.id,
+        })
+        .select('id,ordem')
+        .single();
 
       if (error) throw error;
 
-      await carregarDados();
+      const musica = repertorioGeral.find((m) => String(m.id) === String(musicaId)) || null;
+      setSetlistAtual((prev) => [
+        ...prev,
+        {
+          id: String(novaRelacao.id),
+          ordem: novaRelacao.ordem,
+          repertorio: musica,
+        },
+      ]);
 
-      const musica = repertorioGeral.find((m) => String(m.id) === String(musicaId));
       const titulo = musica?.titulo ? String(musica.titulo) : 'Música adicionada';
-
-      await sendPush({
+      void sendPush({
         title: 'Setlist atualizada: música adicionada!',
         message: `✅ Adicionada: ${titulo}`,
         url: `/eventos/setlists/${eventoId}`,
         data: { kind: 'setlist_add', eventoId, repertorioId: musicaId },
-      });
+      }).catch((err) => console.error('Push de música adicionada falhou:', err));
     } catch (err) {
       console.error('Erro ao adicionar música:', err);
     } finally {
@@ -238,18 +232,16 @@ setMembrosIds(
       const { error } = await supabase.from('evento_repertorio').delete().eq('id', idRelacao);
       if (error) throw error;
 
-      const novo = setlistAtual.filter((x) => String(x.id) !== String(idRelacao));
-      setSetlistAtual(novo);
+      // Não regrava N linhas só para fechar buracos na coluna ordem.
+      // A ordenação continua correta mesmo com gaps, e a UI numera por índice.
+      setSetlistAtual((prev) => prev.filter((x) => String(x.id) !== String(idRelacao)));
 
-      await reordenarSetlistNoBanco(novo);
-      await carregarDados();
-
-      await sendPush({
+      void sendPush({
         title: 'Setlist atualizada: música removida!',
         message: `🗑️ Removida: ${titulo}`,
         url: `/eventos/setlists/${eventoId}`,
         data: { kind: 'setlist_remove', eventoId, relacaoId: idRelacao },
-      });
+      }).catch((err) => console.error('Push de música removida falhou:', err));
     } catch (err) {
       console.error('Erro ao remover música:', err);
       await carregarDados();
@@ -269,12 +261,22 @@ setMembrosIds(
     });
   }, [repertorioGeral, busca, setlistRepertorioIds]);
 
-  const rapidas = musicasDisponiveis.filter((m) => m.categoria === 'Rápida');
-  const moderadas = musicasDisponiveis.filter((m) => m.categoria === 'Moderada');
-  const lentas = musicasDisponiveis.filter((m) => m.categoria === 'Lenta');
-  const outras = musicasDisponiveis.filter(
-    (m) => !['Rápida', 'Moderada', 'Lenta'].includes(String(m.categoria || ''))
-  );
+  const { rapidas, moderadas, lentas, outras } = useMemo(() => {
+    const grupos = {
+      rapidas: [] as Repertorio[],
+      moderadas: [] as Repertorio[],
+      lentas: [] as Repertorio[],
+      outras: [] as Repertorio[],
+    };
+
+    for (const musica of musicasDisponiveis) {
+      if (musica.categoria === 'Rápida') grupos.rapidas.push(musica);
+      else if (musica.categoria === 'Moderada') grupos.moderadas.push(musica);
+      else if (musica.categoria === 'Lenta') grupos.lentas.push(musica);
+      else grupos.outras.push(musica);
+    }
+    return grupos;
+  }, [musicasDisponiveis]);
 
   const Section = ({ title, color, items }: { title: string; color: string; items: Repertorio[] }) => (
     <div className="space-y-2">

@@ -31,7 +31,7 @@ export default function RepertorioPage() {
     setLoading(true);
     const { data } = await supabase
       .from('repertorio')
-      .select('*, membros(nome)')
+      .select('id,titulo,artista,tom,categoria,lead_vocal_custom,lead_vocal_id,membros(nome)')
       .eq('org_id', org.id) // 🔒 Segurança
       .order('titulo');
 
@@ -70,50 +70,59 @@ export default function RepertorioPage() {
     return ['Todos', ...unique, 'Sem vocal'];
   }, [songs]);
 
-  const filteredSongs = songs.filter(s => {
-    const titulo = String(s.titulo || '').toLowerCase();
-    const artista = String(s.artista || '').toLowerCase();
-    const q = searchTerm.toLowerCase();
+  const filteredSongs = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
+    return songs.filter((s) => {
+      const titulo = String(s.titulo || '').toLowerCase();
+      const artista = String(s.artista || '').toLowerCase();
+      const vocalName = getVocalName(s);
 
-    const matchesSearch =
-      titulo.includes(q) ||
-      artista.includes(q) ||
-      getVocalName(s).toLowerCase().includes(q);
+      const matchesSearch =
+        !q || titulo.includes(q) || artista.includes(q) || vocalName.toLowerCase().includes(q);
+      const matchesCategory = filterType === 'Todas' || s.categoria === filterType;
+      const matchesVocal =
+        filterVocal === 'Todos'
+          ? true
+          : filterVocal === 'Sem vocal'
+            ? !vocalName
+            : vocalName === filterVocal;
 
-    const matchesCategory = filterType === 'Todas' || s.categoria === filterType;
+      return matchesSearch && matchesCategory && matchesVocal;
+    });
+  }, [songs, searchTerm, filterType, filterVocal]);
 
-    const vocalName = getVocalName(s);
-    const matchesVocal =
-      filterVocal === 'Todos'
-        ? true
-        : filterVocal === 'Sem vocal'
-          ? !vocalName
-          : vocalName === filterVocal;
+  const categories = useMemo(() => {
+    const grouped = {
+      Rápidas: [] as any[],
+      Moderadas: [] as any[],
+      Lentas: [] as any[],
+      Sem_Definição: [] as any[],
+    };
 
-    return matchesSearch && matchesCategory && matchesVocal;
-  });
-
-  const categories = {
-    Rápidas: filteredSongs.filter(s => s.categoria === 'Rápida'),
-    Moderadas: filteredSongs.filter(s => s.categoria === 'Moderada'),
-    Lentas: filteredSongs.filter(s => s.categoria === 'Lenta'),
-    Sem_Definição: filteredSongs.filter(s => !s.categoria)
-  };
+    for (const song of filteredSongs) {
+      if (song.categoria === 'Rápida') grouped.Rápidas.push(song);
+      else if (song.categoria === 'Moderada') grouped.Moderadas.push(song);
+      else if (song.categoria === 'Lenta') grouped.Lentas.push(song);
+      else if (!song.categoria) grouped.Sem_Definição.push(song);
+    }
+    return grouped;
+  }, [filteredSongs]);
 
   if (!org) return null;
 
   return (
     <SubscriptionGuard>
-      <div className="min-h-screen bg-slate-950 text-slate-100 p-6 pb-24 font-sans">
+      <div className="min-h-screen bg-slate-950 text-slate-100 px-4 sm:px-6 lg:px-8 pb-24 font-sans">
+        <div className="w-full max-w-[1680px] mx-auto pt-4 sm:pt-6 lg:pt-8">
         
-        <header className="flex justify-between items-end mb-10 pt-4">
+        <header className="flex justify-between items-end gap-4 mb-8 sm:mb-10">
           
           <Link href="/" className="group block transition-transform active:scale-95">
             <div>
             <h2 className="text-blue-500 text-[10px] font-black uppercase tracking-[0.4em] mb-1">
               {org.nome || 'Banda'}
             </h2>
-              <h1 className="text-4xl font-black italic tracking-tighter uppercase leading-none text-white group-hover:text-slate-200 transition-colors">
+              <h1 className="text-3xl sm:text-4xl lg:text-5xl font-black italic tracking-tighter uppercase leading-none text-white group-hover:text-slate-200 transition-colors">
                 repertório
               </h1>
             </div>
@@ -121,30 +130,30 @@ export default function RepertorioPage() {
 
           <button 
             onClick={() => router.back()} 
-            className="text-blue-500 flex items-center gap-2 font-bold uppercase text-[16px] tracking-widest hover:text-white transition-colors pb-1"
+            className="text-blue-500 flex items-center gap-2 font-bold uppercase text-sm sm:text-base tracking-widest hover:text-white transition-colors pb-1 shrink-0"
           >
             <ArrowLeft size={16} /> Voltar
           </button>
         </header>
 
         {/* BUSCA + ADD */}
-        <div className="space-y-4 mb-12">
+        <div className="space-y-4 mb-8 sm:mb-10">
           <div className="flex items-center gap-4 w-full">
             <div className="relative flex-1">        
               <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-50" />
               <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-600 size-5" />
               <input
                 placeholder="Buscar título, artista ou vocal"
-                className="w-full bg-slate-900 border border-white/5 rounded-[2rem] py-6 pl-14 pr-6 outline-none focus:ring-2 focus:ring-blue-500 font-bold text-sm transition-all shadow-inner placeholder:text-slate-600"
+                className="w-full bg-slate-900 border border-white/5 rounded-[2rem] py-4 sm:py-5 pl-14 pr-6 outline-none focus:ring-2 focus:ring-blue-500 font-bold text-base transition-all shadow-inner placeholder:text-slate-600"
                 onChange={(e) => setSearchTerm(e.target.value)}
               />
             </div>
 
             <Link
               href="/repertorio/novo"
-              className="bg-blue-600 hover:bg-blue-500 p-5 block rounded-[1.5rem] shadow-2xl shadow-blue-600/20 transition-all active:scale-90"
+              className="bg-blue-600 hover:bg-blue-500 p-4 sm:p-5 block rounded-[1.5rem] shadow-2xl shadow-blue-600/20 transition-all active:scale-95 shrink-0"
             >
-              <Plus size={28} strokeWidth={3} />
+              <Plus className="size-6 sm:size-7" strokeWidth={3} />
             </Link>
           </div>
 
@@ -182,7 +191,7 @@ export default function RepertorioPage() {
           {loading ? (
             <div className="py-20 text-center">
               <Loader2 className="animate-spin text-blue-600 mx-auto mb-4" size={32} />
-              <p className="text-white-600 font-black uppercase tracking-[0.3em] text-[12px]">
+              <p className="text-slate-500 font-black uppercase tracking-[0.3em] text-xs">
                 Sincronizando Base...
               </p>
             </div>
@@ -191,7 +200,7 @@ export default function RepertorioPage() {
               list.length > 0 && (
                 <section key={label}>
                   <div className="flex items-center gap-4 px-2 mb-6 mt-8">
-                    <h2 className={`text-x font-black uppercase tracking-[0.4em] ${
+                    <h2 className={`text-sm sm:text-base font-black uppercase tracking-[0.35em] ${
                       label === 'Rápidas' ? 'text-orange-500' :
                       label === 'Lentas' ? 'text-emerald-400' :
                       label === 'Moderadas' ? 'text-yellow-400' : 'text-slate-600'
@@ -199,28 +208,28 @@ export default function RepertorioPage() {
                       {label.replace('_', ' ')}
                     </h2>
                     <div className="h-[1px] flex-1 bg-white/5" />
-                    <span className="text-x font-black text-blue-600 tracking-tighter">
+                    <span className="text-xs sm:text-sm font-black text-blue-500 tracking-wider whitespace-nowrap">
                       {list.length} ITEMS
                     </span>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4 lg:gap-5">
                     {list.map(song => (
                       <div
                         key={song.id}
-                        className="bg-slate-900/50 border relative rounded-[2.5rem] p-7  transition-all w-full bg-blue-500/5 border-blue-500/20 text-blue-500 py-5 rounded-2xl font-black uppercase text-[14px] tracking-[0.2em] tracking-widest active:scale-95  gap-3 hover:border-blue-500/40 shadow-blue-500/10 hover:text-white  shadow-xl"
+                        className="relative w-full min-w-0 overflow-hidden rounded-[2rem] border border-blue-500/20 bg-slate-900/70 p-5 sm:p-6 transition-all hover:border-blue-500/40 shadow-xl shadow-blue-950/20"
                       >                                      <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-50" />
 
-                        <div className="flex justify-between items-start">
-                          <div className="flex-1">
-                            <span className="text-[9px] font-black text-blue-500/60 uppercase tracking-[0.2em] block mb-1">
+                        <div className="flex justify-between items-start gap-4">
+                          <div className="flex-1 min-w-0">
+                            <span className="text-[11px] font-black text-blue-400/70 uppercase tracking-[0.18em] block mb-2 break-words">
                               {song.artista || 'Artista Desconhecido'}
                             </span>
-                            <h3 className="text-2xl font-black italic uppercase text-white truncate max-w-[200px]">
+                            <h3 className="text-xl sm:text-2xl font-black italic uppercase text-white leading-tight break-words">
                               {song.titulo}
                             </h3>
 
-                            <div className="flex gap-4 mt-4">
+                            <div className="flex flex-wrap items-center gap-3 sm:gap-4 mt-4">
                               <div className="flex items-center gap-2 bg-slate-950 px-3 py-1.5 rounded-xl border border-white/5">
                                 <Music size={12} className="text-yellow-500" />
                                 <span className="text-xs font-black text-yellow-500">
@@ -228,23 +237,23 @@ export default function RepertorioPage() {
                                 </span>
                               </div>
 
-                              <div className="flex items-center gap-2 text-xs font-black text-slate-400">
+                              <div className="flex items-center gap-2 text-xs sm:text-sm font-black text-slate-400 min-w-0">
                                 <Mic2 size={12} />
                                 {getVocalName(song) || '—'}
                               </div>
                             </div>
                           </div>
 
-                          <div className="flex flex-col gap-1">
+                          <div className="flex flex-col gap-2 shrink-0">
                             <Link
                               href={`/repertorio/editar/${song.id}`}
-                              className="p-3 bg-slate-950 rounded-2xl border border-white/5 text-slate-600 hover:text-blue-400 transition-colors"
+                              className="size-11 sm:size-12 flex items-center justify-center bg-slate-950 rounded-2xl border border-white/5 text-slate-500 hover:text-blue-400 hover:border-blue-500/20 transition-colors"
                             >
                               <Edit2 size={18} />
                             </Link>
                             <button
                               onClick={() => handleDelete(song.id, song.titulo)}
-                              className="p-3 bg-slate-950 rounded-2xl border border-white/5 text-slate-800 hover:text-red-500 transition-colors"
+                              className="size-11 sm:size-12 flex items-center justify-center bg-slate-950 rounded-2xl border border-white/5 text-slate-600 hover:text-red-500 hover:border-red-500/20 transition-colors"
                             >
                               <Trash2 size={18} />
                             </button>
@@ -267,6 +276,7 @@ export default function RepertorioPage() {
             </p>
           </div>
         )}
+        </div>
       </div>
     </SubscriptionGuard>
   );

@@ -29,7 +29,7 @@ export default function ClientProviders({ children }: { children: React.ReactNod
     <>
       <Script
         src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js"
-        strategy="afterInteractive"
+        strategy="lazyOnload"
       />
       <Suspense fallback={null}>
         <OrgProvider>{children}</OrgProvider>

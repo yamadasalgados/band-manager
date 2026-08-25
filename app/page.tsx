@@ -96,6 +96,42 @@ function formatEventDate(evData: string) {
   });
 }
 
+function formatEventDateLong(evData: string) {
+  if (!evData) return 'Data não definida';
+  const date = new Date(evData);
+  if (Number.isNaN(date.getTime())) return 'Data não definida';
+  return date.toLocaleDateString('pt-BR', {
+    weekday: 'short',
+    day: '2-digit',
+    month: 'short',
+  });
+}
+
+function formatCountdown(evData: string, nowMs: number) {
+  const target = new Date(evData).getTime();
+  if (!Number.isFinite(target)) return 'Data pendente';
+
+  const diff = target - nowMs;
+  const eventDate = new Date(target);
+  const now = new Date(nowMs);
+  const sameDay =
+    eventDate.getFullYear() === now.getFullYear() &&
+    eventDate.getMonth() === now.getMonth() &&
+    eventDate.getDate() === now.getDate();
+
+  if (sameDay) return 'Hoje';
+  if (diff <= 0) return 'Data passada';
+
+  const totalMinutes = Math.max(1, Math.floor(diff / 60000));
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}min`;
+  return `${minutes}min`;
+}
+
 function pickOneCandidate(cands: any[]) {
   return [...(cands || [])].sort((a, b) => {
     const na = String(a?.membros?.nome || '').localeCompare(String(b?.membros?.nome || ''), 'pt-BR', {
@@ -176,11 +212,14 @@ export default function HomeMembro() {
   const [eventos, setEventos] = useState<any[]>([]);
   const [minhasEscalas, setMinhasEscalas] = useState<any[]>([]);
   const [todasEscalas, setTodasEscalas] = useState<any[]>([]);
+  const [operacoes, setOperacoes] = useState<any[]>([]);
+  const [checklistOperacional, setChecklistOperacional] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [confirmandoId, setConfirmandoId] = useState<string | null>(null);
   const [perfilAtivo, setPerfilAtivo] = useState<any>(null);
   const [pushStatus, setPushStatus] = useState<'default' | 'granted' | 'denied'>('default');
   const [rangeKey, setRangeKey] = useState<RangeKey>('all');
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   const cn = (...c: Array<string | false | null | undefined>) => c.filter(Boolean).join(' ');
 
@@ -190,6 +229,173 @@ export default function HomeMembro() {
     if (rangeKey === 'month') return 'Este mês';
     return 'Este ano';
   }, [rangeKey]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 60000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const escalasPorEvento = useMemo(() => {
+    const grouped = new Map<string, any[]>();
+    for (const escala of todasEscalas) {
+      const key = String(escala?.evento_id || '');
+      if (!key) continue;
+      const atual = grouped.get(key);
+      if (atual) atual.push(escala);
+      else grouped.set(key, [escala]);
+    }
+    return grouped;
+  }, [todasEscalas]);
+
+  const minhaEscalaPorEvento = useMemo(() => {
+    const grouped = new Map<string, any>();
+    for (const escala of minhasEscalas) {
+      const key = String(escala?.evento_id || '');
+      if (key) grouped.set(key, escala);
+    }
+    return grouped;
+  }, [minhasEscalas]);
+
+  const operacaoPorEvento = useMemo(() => {
+    const grouped = new Map<string, any>();
+    for (const item of operacoes) {
+      const key = String(item?.evento_id || '');
+      if (key) grouped.set(key, item);
+    }
+    return grouped;
+  }, [operacoes]);
+
+  const checklistPorEvento = useMemo(() => {
+    const grouped = new Map<string, any[]>();
+    for (const item of checklistOperacional) {
+      const key = String(item?.evento_id || '');
+      if (!key) continue;
+      const current = grouped.get(key);
+      if (current) current.push(item);
+      else grouped.set(key, [item]);
+    }
+    return grouped;
+  }, [checklistOperacional]);
+
+  const eventoEmFoco = useMemo(() => {
+    if (eventos.length === 0) return null;
+
+    const startOfToday = new Date(nowMs);
+    startOfToday.setHours(0, 0, 0, 0);
+    const startMs = startOfToday.getTime();
+
+    return (
+      eventos.find((evento) => {
+        const timestamp = new Date(evento?.data || '').getTime();
+        return Number.isFinite(timestamp) && timestamp >= startMs;
+      }) || eventos[0]
+    );
+  }, [eventos, nowMs]);
+
+  const resumoEventoEmFoco = useMemo(() => {
+    if (!eventoEmFoco) return null;
+
+    const eventoId = String(eventoEmFoco.id);
+    const participantes = escalasPorEvento.get(eventoId) || [];
+    const minhaEscala = minhaEscalaPorEvento.get(eventoId);
+    const setlist = Array.isArray(eventoEmFoco.evento_repertorio) ? eventoEmFoco.evento_repertorio : [];
+    const musicas = setlist.map((item: any) => item?.repertorio).filter(Boolean);
+
+    const operacao = operacaoPorEvento.get(eventoId);
+    const checklist = checklistPorEvento.get(eventoId) || [];
+    const checklistConcluido = checklist.filter((item: any) => item?.concluido).length;
+    const operacaoOk = Boolean(
+      operacao?.chegada_em &&
+        operacao?.passagem_som_em &&
+        (String(operacao?.endereco || '').trim() || String(operacao?.mapa_url || '').trim())
+    );
+    const checklistOk = checklist.length > 0 && checklistConcluido === checklist.length;
+
+    const checks = [
+      { key: 'setlist', label: 'Setlist', ok: musicas.length > 0, detail: `${musicas.length} músicas` },
+      {
+        key: 'lineup',
+        label: 'Lineup',
+        ok: participantes.length > 0,
+        detail: `${participantes.length} confirmados`,
+      },
+      {
+        key: 'bpm',
+        label: 'BPM',
+        ok: musicas.length > 0 && musicas.every((musica: any) => Number(musica?.bpm) > 0),
+        detail:
+          musicas.length === 0
+            ? 'aguardando setlist'
+            : `${musicas.filter((musica: any) => !Number(musica?.bpm)).length} pendentes`,
+      },
+      {
+        key: 'tom',
+        label: 'Tons',
+        ok:
+          musicas.length > 0 &&
+          musicas.every((musica: any) => String(musica?.tom || '').trim().length > 0),
+        detail:
+          musicas.length === 0
+            ? 'aguardando setlist'
+            : `${musicas.filter((musica: any) => !String(musica?.tom || '').trim()).length} pendentes`,
+      },
+    ];
+
+    const isCompleteEvent = eventoEmFoco?.modo_preparacao === 'completo';
+
+    if (isCompleteEvent) {
+      checks.push({
+        key: 'operacao',
+        label: 'Operação',
+        ok: operacaoOk,
+        detail: operacaoOk ? 'logística definida' : 'chegada / passagem / endereço pendentes',
+      });
+
+      checks.push({
+        key: 'checklist',
+        label: 'Checklist',
+        ok: checklistOk,
+        detail: checklist.length === 0 ? 'nenhum item' : `${checklistConcluido}/${checklist.length} concluídos`,
+      });
+    }
+
+    if (perfilAtivo) {
+      checks.push({
+        key: 'presenca',
+        label: 'Minha presença',
+        ok: minhaEscala?.status === 'confirmado',
+        detail:
+          minhaEscala?.status === 'confirmado'
+            ? 'confirmada'
+            : minhaEscala?.status === 'falta'
+            ? 'marcada como falta'
+            : 'não respondida',
+      });
+    }
+
+    const completed = checks.filter((check) => check.ok).length;
+    const readiness = checks.length > 0 ? Math.round((completed / checks.length) * 100) : 0;
+    const status = readiness === 100 ? 'Pronto para o palco' : readiness >= 60 ? 'Quase pronto' : 'Precisa de atenção';
+
+    return {
+      participantes,
+      musicas,
+      checks,
+      completed,
+      readiness,
+      status,
+      countdown: formatCountdown(eventoEmFoco.data, nowMs),
+      isCompleteEvent,
+    };
+  }, [
+    checklistPorEvento,
+    escalasPorEvento,
+    eventoEmFoco,
+    minhaEscalaPorEvento,
+    nowMs,
+    operacaoPorEvento,
+    perfilAtivo,
+  ]);
 
   const carregarDashboard = useCallback(async () => {
     if (!org?.id) return;
@@ -218,7 +424,7 @@ export default function HomeMembro() {
 
       let q = supabase
         .from('eventos')
-        .select(`*, evento_repertorio(id, repertorio(*))`)
+        .select(`id, local, data, paleta_cores, recorrencia_id, modo_preparacao, evento_repertorio(id, repertorio(id, titulo, categoria, bpm, tom))`)
         .eq('org_id', org.id)
         .eq('finalizado', false)
         .order('data', { ascending: true });
@@ -237,31 +443,53 @@ export default function HomeMembro() {
       if (!evs || evs.length === 0) {
         setMinhasEscalas([]);
         setTodasEscalas([]);
+        setOperacoes([]);
+        setChecklistOperacional([]);
         return;
       }
 
       const ids = evs.map((e: any) => e.id);
 
-      const { data: escGeral, error: errGeral } = await supabase
+      const geralPromise = supabase
         .from('escalas')
         .select(`evento_id, status, membro_id, membros!membro_id(nome, funcao, subfuncao)`)
         .in('evento_id', ids)
         .eq('org_id', org.id)
         .eq('status', 'confirmado');
 
-      setTodasEscalas(errGeral ? [] : escGeral || []);
+      const minhasPromise = user
+        ? supabase
+            .from('escalas')
+            .select('evento_id,status,membro_id')
+            .in('evento_id', ids)
+            .eq('membro_id', user.id)
+        : Promise.resolve({ data: [], error: null });
 
-      if (user) {
-        const { data: escMinhas, error: errMinhas } = await supabase
-          .from('escalas')
-          .select('*')
-          .in('evento_id', ids)
-          .eq('membro_id', user.id);
+      const operacoesPromise = supabase
+        .from('evento_operacao')
+        .select('evento_id,chegada_em,passagem_som_em,endereco,mapa_url')
+        .in('evento_id', ids)
+        .eq('org_id', org.id);
 
-        setMinhasEscalas(errMinhas ? [] : escMinhas || []);
-      } else {
-        setMinhasEscalas([]);
-      }
+      const checklistPromise = supabase
+        .from('evento_checklist')
+        .select('evento_id,concluido')
+        .in('evento_id', ids)
+        .eq('org_id', org.id);
+
+      const [geralRes, minhasRes, operacoesRes, checklistRes] = await Promise.all([
+        geralPromise,
+        minhasPromise,
+        operacoesPromise,
+        checklistPromise,
+      ]);
+
+      setTodasEscalas(geralRes.error ? [] : geralRes.data || []);
+      setMinhasEscalas(minhasRes.error ? [] : minhasRes.data || []);
+      // Compatibilidade: se a migration v13 ainda não foi aplicada, o Dashboard
+      // continua funcionando e apenas considera a parte operacional pendente.
+      setOperacoes(operacoesRes.error ? [] : operacoesRes.data || []);
+      setChecklistOperacional(checklistRes.error ? [] : checklistRes.data || []);
     } catch (err) {
       console.error(err);
     } finally {
@@ -291,7 +519,8 @@ async function alternarPresenca(eventoId: string, statusAtual?: string) {
     return alert('Assinatura da banda pendente. Fale com o líder.');
   }
 
-  const atual = statusAtual || 'confirmado';
+  // Sem escala anterior, o primeiro clique deve confirmar presença.
+  const atual = statusAtual || 'falta';
   const novoStatus = atual === 'falta' ? 'confirmado' : 'falta';
   if (novoStatus === 'falta' && !confirm('Confirmar ausência neste evento?')) return;
 
@@ -313,42 +542,54 @@ async function alternarPresenca(eventoId: string, statusAtual?: string) {
       return;
     }
 
-    // ✅ (Opcional) atualiza UI uma vez
-    await carregarDashboard();
+    // Atualização otimista: evita recarregar todos os eventos/escalas após cada clique.
+    setMinhasEscalas((prev) => {
+      const semAtual = prev.filter((e) => String(e.evento_id) !== String(eventoId));
+      return [...semAtual, { evento_id: eventoId, membro_id: perfilAtivo.id, status: novoStatus }];
+    });
 
-    // 🔔 PUSH DE PRESENÇA (alvos atuais e confiáveis)
-    try {
-      const { data: confirmados, error: e2 } = await supabase
-        .from('escalas')
-        .select('membro_id')
-        .eq('org_id', org.id)
-        .eq('evento_id', eventoId)
-        .eq('status', 'confirmado');
+    setTodasEscalas((prev) => {
+      const semAtual = prev.filter(
+        (e) => !(String(e.evento_id) === String(eventoId) && String(e.membro_id) === String(perfilAtivo.id))
+      );
 
-      if (!e2) {
-const membrosIds = (confirmados || [])
-  .map((x: any) => String(x?.membro_id || '').trim())
-  .filter(Boolean)
-  .filter((id: string) => id !== String(perfilAtivo.id));
+      if (novoStatus !== 'confirmado') return semAtual;
 
+      return [
+        ...semAtual,
+        {
+          evento_id: eventoId,
+          membro_id: perfilAtivo.id,
+          status: 'confirmado',
+          membros: {
+            nome: perfilAtivo.nome,
+            funcao: perfilAtivo.funcao,
+            subfuncao: perfilAtivo.subfuncao,
+          },
+        },
+      ];
+    });
 
-        if (membrosIds.length > 0) {
-          await sendPush({
-            title: 'Presença atualizada',
-            message: `${perfilAtivo.nome} marcou ${novoStatus === 'falta' ? 'falta' : 'presença'} no evento.`,
-            url: `/`,
-            externalUserIds: membrosIds,
-            data: {
-              type: 'presence_update',
-              eventoId,
-              membroId: perfilAtivo.id,
-              status: novoStatus,
-            },
-          });
-        }
-      }
-    } catch (err) {
-      console.error('Erro ao enviar push de presença:', err);
+    // Push não precisa bloquear a resposta visual do botão.
+    const membrosIds = todasEscalas
+      .filter((x: any) => String(x?.evento_id) === String(eventoId))
+      .map((x: any) => String(x?.membro_id || '').trim())
+      .filter(Boolean)
+      .filter((memberId: string) => memberId !== String(perfilAtivo.id));
+
+    if (membrosIds.length > 0) {
+      void sendPush({
+        title: 'Presença atualizada',
+        message: `${perfilAtivo.nome} marcou ${novoStatus === 'falta' ? 'falta' : 'presença'} no evento.`,
+        url: `/`,
+        externalUserIds: membrosIds,
+        data: {
+          type: 'presence_update',
+          eventoId,
+          membroId: perfilAtivo.id,
+          status: novoStatus,
+        },
+      }).catch((err) => console.error('Erro ao enviar push de presença:', err));
     }
   } finally {
     setConfirmandoId(null);
@@ -407,7 +648,7 @@ const membrosIds = (confirmados || [])
               </div>
             </div>
             <Link
-              href="/perfil"
+              href="/membros"
               className="block w-full bg-slate-900 border border-white/10 py-4 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-800"
             >
               Entrar com Convite
@@ -420,8 +661,8 @@ const membrosIds = (confirmados || [])
 
   return (
 <SubscriptionGuard>
-        <div className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-slate-950 text-white px-4 pb-24 font-sans pt-[env(safe-area-inset-top)]">
-        <div className="pt-6 w-full max-w-6xl mx-auto">
+        <div className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-slate-950 text-white px-4 sm:px-6 lg:px-8 pb-24 font-sans">
+        <div className="pt-6 w-full max-w-[1600px] mx-auto">
           {!perfilAtivo && (
             <div className="mb-6 p-4 bg-orange-500/10 border border-orange-500/20 rounded-2xl flex items-center gap-3 animate-pulse">
               <AlertCircle className="text-orange-500 flex-shrink-0" size={20} />
@@ -438,7 +679,7 @@ const membrosIds = (confirmados || [])
                   <h2 className="text-blue-500 text-[10px] font-black uppercase tracking-[0.4em] group-hover:text-blue-400 transition-colors">
                     Backstage Control
                   </h2>
-                  <h1 className="text-3xl font-black italic tracking-tighter uppercase leading-none text-white group-hover:text-slate-200 transition-colors break-words">
+                  <h1 className="text-3xl sm:text-4xl font-black italic tracking-tighter uppercase leading-none text-white group-hover:text-slate-200 transition-colors break-words">
                     {org.nome || 'Minha Banda'}
                   </h1>
                 </div>
@@ -470,7 +711,7 @@ const membrosIds = (confirmados || [])
                 <Link href="/membros" className="group">
                   <div className="size-12 bg-slate-900 border border-white/5 rounded-2xl flex items-center justify-center text-blue-500 hover:border-blue-500/50 transition-all">
                     {perfilAtivo ? (
-                      <div className="size-12 bg-blue-600 rounded-2xl flex items-center justify-center text-white font-black text-s">
+                      <div className="size-12 bg-blue-600 rounded-2xl flex items-center justify-center text-white font-black text-sm">
                         {String(perfilAtivo?.nome || '?').trim().charAt(0).toUpperCase()}
                       </div>
                     ) : (
@@ -481,6 +722,137 @@ const membrosIds = (confirmados || [])
               </div>
             </div>
           </header>
+
+          {eventoEmFoco && resumoEventoEmFoco && (
+            <section className="relative overflow-hidden mb-6 rounded-[2rem] border border-blue-500/20 bg-gradient-to-br from-blue-500/[0.09] via-slate-900/90 to-slate-950 shadow-2xl shadow-blue-950/20">
+              <div className="absolute top-0 left-0 h-1 w-full bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-70" />
+
+              <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.25fr)_minmax(360px,0.75fr)]">
+                <div className="p-5 sm:p-7 lg:p-8 xl:border-r xl:border-white/5">
+                  <div className="flex flex-wrap items-center gap-2 mb-5">
+                    <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-3 py-1.5 text-[9px] font-black uppercase tracking-[0.2em] text-blue-300">
+                      Central do show
+                    </span>
+                    <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-[9px] font-black uppercase tracking-widest text-slate-300">
+                      {resumoEventoEmFoco.countdown}
+                    </span>
+                  </div>
+
+                  <p className="text-[10px] sm:text-xs font-black uppercase tracking-[0.22em] text-blue-400 mb-2">
+                    {formatEventDateLong(eventoEmFoco.data)}
+                  </p>
+                  <h2 className="max-w-4xl text-3xl sm:text-4xl lg:text-5xl font-black italic uppercase tracking-tighter leading-[0.95] break-words">
+                    {eventoEmFoco.local || 'Próximo evento'}
+                  </h2>
+
+                  <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs font-bold text-slate-400">
+                    <span className="flex items-center gap-2">
+                      <ListMusic size={15} className="text-blue-400" />
+                      {resumoEventoEmFoco.musicas.length} músicas
+                    </span>
+                    <span className="flex items-center gap-2">
+                      <Users size={15} className="text-emerald-400" />
+                      {resumoEventoEmFoco.participantes.length} confirmados
+                    </span>
+                  </div>
+
+                  <div className="mt-7 flex flex-col sm:flex-row gap-3">
+                    <Link
+                      href={`/live/${eventoEmFoco.id}`}
+                      className="inline-flex min-h-12 items-center justify-center gap-2 rounded-2xl bg-blue-600 px-6 py-3 text-[10px] font-black uppercase tracking-[0.18em] text-white shadow-lg shadow-blue-600/20 transition-all hover:bg-blue-500 active:scale-[0.98]"
+                    >
+                      <PlayCircle size={18} /> Abrir Live
+                    </Link>
+                    <Link
+                      href={`/eventos/${eventoEmFoco.id}`}
+                      className="inline-flex min-h-12 items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-6 py-3 text-[10px] font-black uppercase tracking-[0.18em] text-slate-200 transition-all hover:border-blue-500/30 hover:bg-blue-500/10 active:scale-[0.98]"
+                    >
+                      <Gauge size={18} /> Preparar show
+                    </Link>
+                  </div>
+                </div>
+
+                <div className="p-5 sm:p-7 lg:p-8 bg-black/10">
+                  <div className="flex items-start justify-between gap-5">
+                    <div>
+                      <p className="text-[9px] font-black uppercase tracking-[0.2em] text-slate-500 mb-1">Preparação</p>
+                      <h3 className={cn(
+                        'text-lg sm:text-xl font-black uppercase tracking-tight',
+                        resumoEventoEmFoco.readiness === 100
+                          ? 'text-emerald-300'
+                          : resumoEventoEmFoco.readiness >= 60
+                          ? 'text-yellow-300'
+                          : 'text-orange-300'
+                      )}>
+                        {resumoEventoEmFoco.status}
+                      </h3>
+                    </div>
+                    <div className="text-right">
+                      <strong className="block text-3xl font-black tabular-nums">{resumoEventoEmFoco.readiness}%</strong>
+                      <span className="text-[8px] font-black uppercase tracking-widest text-slate-600">
+                        {resumoEventoEmFoco.completed}/{resumoEventoEmFoco.checks.length}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/5">
+                    <div
+                      className={cn(
+                        'h-full rounded-full transition-all duration-500',
+                        resumoEventoEmFoco.readiness === 100
+                          ? 'bg-emerald-500'
+                          : resumoEventoEmFoco.readiness >= 60
+                          ? 'bg-yellow-400'
+                          : 'bg-orange-500'
+                      )}
+                      style={{ width: `${resumoEventoEmFoco.readiness}%` }}
+                    />
+                  </div>
+
+                  <div className="mt-5 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2 gap-2">
+                    {resumoEventoEmFoco.checks.map((check) => (
+                      <div
+                        key={check.key}
+                        className={cn(
+                          'rounded-xl border px-3 py-2.5 flex items-center gap-3 min-w-0',
+                          check.ok
+                            ? 'border-emerald-500/15 bg-emerald-500/[0.06]'
+                            : 'border-orange-500/15 bg-orange-500/[0.06]'
+                        )}
+                      >
+                        {check.ok ? (
+                          <CheckCircle2 size={16} className="shrink-0 text-emerald-400" />
+                        ) : (
+                          <AlertCircle size={16} className="shrink-0 text-orange-400" />
+                        )}
+                        <div className="min-w-0">
+                          <span className="block text-[10px] font-black uppercase text-slate-200">{check.label}</span>
+                          <span className="block text-[9px] font-bold text-slate-500 truncate">{check.detail}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="border-t border-white/5 bg-black/15 px-3 sm:px-5 py-3 overflow-x-auto no-scrollbar">
+                <div className="min-w-max flex items-center gap-2">
+                  <Link href="/repertorio" className="inline-flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.035] px-4 py-2.5 text-[9px] font-black uppercase tracking-widest text-slate-300 hover:text-white hover:border-blue-500/20">
+                    <Music size={14} className="text-blue-400" /> Repertório
+                  </Link>
+                  <Link href="/eventos/setlists" className="inline-flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.035] px-4 py-2.5 text-[9px] font-black uppercase tracking-widest text-slate-300 hover:text-white hover:border-blue-500/20">
+                    <ListMusic size={14} className="text-blue-400" /> Setlists
+                  </Link>
+                  <Link href="/membros" className="inline-flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.035] px-4 py-2.5 text-[9px] font-black uppercase tracking-widest text-slate-300 hover:text-white hover:border-blue-500/20">
+                    <Users size={14} className="text-blue-400" /> Membros
+                  </Link>
+                  <Link href="/eventos/novo" className="inline-flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.035] px-4 py-2.5 text-[9px] font-black uppercase tracking-widest text-slate-300 hover:text-white hover:border-blue-500/20">
+                    <Calendar size={14} className="text-blue-400" /> Novo evento
+                  </Link>
+                </div>
+              </div>
+            </section>
+          )}
 
           <div className="mt-4 flex items-center gap-2 overflow-x-auto no-scrollbar pb-4">
             <FilterPill k="all" label="Todos" />
@@ -516,10 +888,10 @@ const membrosIds = (confirmados || [])
               </div>
             ) : (
               eventos.map((ev) => {
-                const escalaPropria = minhasEscalas.find((e) => e.evento_id === ev.id);
+                const escalaPropria = minhaEscalaPorEvento.get(String(ev.id));
                 const isFalta = escalaPropria?.status === 'falta';
                 const isConfirmado = escalaPropria?.status === 'confirmado';
-                const participantes = todasEscalas.filter((e) => e.evento_id === ev.id);
+                const participantes = escalasPorEvento.get(String(ev.id)) || [];
                 const papelMap = buildPapeisDoEvento(participantes);
                 const isProcessando = confirmandoId === ev.id;
                 const paletaShow = String(ev?.paleta_cores || '').trim() || 'Look Padrão';
@@ -580,17 +952,17 @@ const membrosIds = (confirmados || [])
                           <h2 className="text-2xl font-black tracking-tighter uppercase italic leading-none break-words">
                             {ev.local}
                           </h2>
-                          <div className="mt-3 flex items-center gap-2 text-[9px] font-black text-blue-500 bg-blue-500/10 w-fit px-3 py-1.5 rounded-full border border-pink-500/10 uppercase">
+                          <div className="mt-3 flex items-center gap-2 text-[9px] font-black text-blue-500 bg-blue-500/10 w-fit px-3 py-1.5 rounded-full border border-blue-500/20 uppercase">
                             <Palette size={12} /> {paletaShow}
                           </div>
                         </div>
 
                         <Link
-                          href={`/eventos/setlists/${ev.id}`}
+                          href={`/eventos/${ev.id}`}
                           className="size-14 bg-slate-800 border border-white/5 rounded-2xl flex flex-col items-center justify-center text-blue-400 hover:text-blue-300 hover:border-blue-500/50 active:scale-95 transition-all"
-                          title="Gerenciar repertório do dia"
+                          title="Abrir central do evento"
                         >
-                          <ListMusic size={20} />
+                          <Gauge size={20} />
                         </Link>
 
                         {ev.recorrencia_id && (
@@ -630,7 +1002,7 @@ const membrosIds = (confirmados || [])
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
                         {/* Lineup */}
                         <div className="space-y-2">
-                          <h4 className="text-xs font-black text-white-500 uppercase tracking-widest mb-4 flex items-center gap-2">
+                          <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2">
                             <Users size={12} /> Lineup Confirmado
                           </h4>
 
@@ -695,7 +1067,7 @@ const membrosIds = (confirmados || [])
 
                         {/* Setlist */}
                         <div className="space-y-2">
-                          <h4 className="text-xs font-black text-white-500 uppercase tracking-widest mb-4 flex items-center gap-2">
+                          <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2">
                             <ListMusic size={12} /> Setlist do dia
                           </h4>
 
@@ -728,7 +1100,7 @@ const membrosIds = (confirmados || [])
                                     </span>
                                   </div>
 
-                                  <span className="text-[10px] font-bold text-white-500 uppercase shrink-0">
+                                  <span className="text-[10px] font-bold text-slate-400 uppercase shrink-0">
                                     {r?.repertorio?.categoria || '—'}
                                   </span>
                                 </div>

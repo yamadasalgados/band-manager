@@ -21,8 +21,6 @@ export default function HistoricoEventos() {
   const [eventos, setEventos] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [busca, setBusca] = useState('');
-  if (!org) return null; // Ou um loader customizado
-
   useEffect(() => {
     async function carregarHistorico() {
       // Se não tiver org carregada, não busca nada para não misturar dados
@@ -75,6 +73,8 @@ export default function HistoricoEventos() {
       return local.includes(q) || paleta.includes(q) || dataFmt.includes(q);
     });
   }, [eventos, busca]);
+
+  if (!org) return null;
 
   if (loading) return (
     <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center gap-4">

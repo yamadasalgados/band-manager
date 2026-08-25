@@ -1,50 +1,56 @@
-import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { NextResponse } from 'next/server';
+import { timingSafeEqual } from 'node:crypto';
+import { requireUserOrg } from '@/lib/serverAuth';
 
-export const dynamic = "force-dynamic"; // evita cache em alguns deploys
+export const dynamic = 'force-dynamic';
+
+function safeEqual(a: string, b: string) {
+  const aa = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return aa.length === bb.length && timingSafeEqual(aa, bb);
+}
 
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => null);
-
-    const orgId = String(body?.orgId || "").trim();
-    const pin = String(body?.pin || "").replace(/\D/g, "").slice(0, 6);
+    const orgId = String(body?.orgId || '').trim();
+    const pin = String(body?.pin || '').replace(/\D/g, '').slice(0, 6);
 
     if (!orgId || pin.length !== 6) {
-      return NextResponse.json({ ok: false, error: "invalid" }, { status: 400 });
+      return NextResponse.json({ ok: false, error: 'invalid' }, { status: 400 });
     }
 
-    // ✅ Melhor usar SUPABASE_URL (não precisa ser NEXT_PUBLIC no server)
-    const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-    if (!supabaseUrl || !serviceKey) {
-      console.error("Missing env:", { hasUrl: !!supabaseUrl, hasServiceKey: !!serviceKey });
-      return NextResponse.json({ ok: false, error: "missing_env" }, { status: 500 });
-    }
-
-    const supabase = createClient(supabaseUrl, serviceKey);
-
-    const { data, error } = await supabase
-      .from("organizacoes")
-      .select("pin_acesso")
-      .eq("id", orgId)
+    const { user, service } = await requireUserOrg(req, orgId);
+    const { data, error } = await service
+      .from('organizacoes')
+      .select('pin_acesso')
+      .eq('id', orgId)
       .maybeSingle();
 
-    if (error) {
-      console.error("PIN query error:", error);
-      return NextResponse.json({ ok: false, error: "query" }, { status: 500 });
+    if (error) throw error;
+
+    const storedPin = String(data?.pin_acesso || '').replace(/\D/g, '').slice(0, 6);
+    const ok = storedPin.length === 6 && safeEqual(storedPin, pin);
+
+    if (ok) {
+      // O PIN continua sendo a elevação administrativa do fluxo atual.
+      await service.from('organizacao_acessos').upsert(
+        {
+          user_id: user.id,
+          org_id: orgId,
+          role: 'admin',
+          last_seen_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'user_id' }
+      );
     }
 
-    const pinBanco = String(data?.pin_acesso || "").replace(/\D/g, "").slice(0, 6);
-    const ok = pinBanco.length === 6 && pinBanco === pin;
-
-    // ✅ debug útil (não vaza o PIN)
-    console.log("pin-check:", { orgId, ok, hasPinBanco: pinBanco.length === 6 });
-
     return NextResponse.json({ ok });
-  } catch (e) {
-    console.error("PIN server error:", e);
-    return NextResponse.json({ ok: false, error: "server" }, { status: 500 });
+  } catch (e: any) {
+    const code = String(e?.message || '');
+    const status = code === 'AUTH_REQUIRED' || code === 'AUTH_INVALID' ? 401 : code === 'ORG_FORBIDDEN' ? 403 : 500;
+    console.error('[org/verify-pin]', e);
+    return NextResponse.json({ ok: false, error: code || 'server' }, { status });
   }
 }
