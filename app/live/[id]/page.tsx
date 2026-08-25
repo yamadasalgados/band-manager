@@ -157,6 +157,7 @@ type SyncMessage =
       blocoAtivo: number;
       musicaId?: string;
       resume?: boolean;
+      maestroId?: string;
       maestroStartAtMs?: number;
     }
   | { kind: 'QUEUE'; senderId: string; musicaId: string | null }
@@ -176,7 +177,7 @@ type SyncMessage =
       nextBlockOverride?: number | null;
     }
   | { kind: 'PING'; senderId: string; pingId: string; t0: number } // t0 no relógio do follower
-  | { kind: 'PONG'; senderId: string; pingId: string; t0: number; t1: number }; // t1 no relógio do “referência”
+  | { kind: 'PONG'; senderId: string; pingId: string; t0: number; t1: number; t2?: number }; // NTP: receive/send no relógio da referência
 
 function genId() {
   return `${Math.random().toString(16).slice(2)}-${Date.now().toString(16)}`;
@@ -281,14 +282,19 @@ export default function ModoLiveNonStop() {
 
   // ✅ Clock Sync (NTP leve): offset = (refTime - localTime)
   const [clockOffsetMs, setClockOffsetMs] = useState(0);
+  const [syncRttMs, setSyncRttMs] = useState<number | null>(null);
   const clockOffsetRef = useRef(0);
+  const clockSamplesRef = useRef<Array<{ offset: number; rtt: number }>>([]);
   useEffect(() => {
     clockOffsetRef.current = clockOffsetMs;
   }, [clockOffsetMs]);
 
-  // Quem iniciou o último START vira a referência (sem UI)
+  // Quem iniciou o último START vira a referência de ritmo.
+  // Na prática, o baterista pode apertar Play e todos os outros seguem o relógio dele.
   const isReferenceRef = useRef(false);
+  const [isRhythmReference, setIsRhythmReference] = useState(false);
   const referenceIdRef = useRef<string | null>(null);
+  const referenceBlockStartEpochMsRef = useRef<number | null>(null);
 
   const lastPingIdRef = useRef<string | null>(null);
 
@@ -598,18 +604,12 @@ export default function ModoLiveNonStop() {
     } catch {}
   }, []);
 
-  const resetTimeForNewBlock = useCallback(() => {
-    blockStartEpochRef.current = Date.now();
-    setProgresso(0);
-    subChordIndexRef.current = 0;
-    setSubChordIndex(0);
-  }, []);
-
   const stopShow = useCallback(async () => {
     setAutoScroll(false);
     clearCountdown();
     setProgresso(0);
     blockStartEpochRef.current = null;
+    referenceBlockStartEpochMsRef.current = null;
     subChordIndexRef.current = 0;
     setSubChordIndex(0);
     cancelRaf();
@@ -875,10 +875,39 @@ export default function ModoLiveNonStop() {
           } satisfies SyncMessage,
         });
       } catch {}
-    }, 2000);
+    }, 1200);
 
     return () => window.clearInterval(t);
   }, [connected, syncEnabled]);
+
+  // A referência envia um playhead autoritativo periodicamente. Isso não
+  // controla a UI visual dos outros aparelhos; serve apenas para corrigir
+  // relógio/bloco aos poucos e impedir drift acumulado entre navegadores.
+  useEffect(() => {
+    if (!connected || !syncEnabled) return;
+
+    const timer = window.setInterval(() => {
+      if (!isReferenceRef.current) return;
+      const snapshot = playbackSnapshotRef.current;
+      if (!snapshot.autoScroll || !snapshot.musicaId) return;
+
+      void sendSync({
+        kind: 'STATE',
+        senderId: clientIdRef.current,
+        maestroId: clientIdRef.current,
+        playing: true,
+        musicaId: snapshot.musicaId,
+        blocoAtivo: snapshot.blocoAtivo,
+        blockStartEpochMs: blockStartEpochRef.current,
+        bpm: snapshot.effectiveBpm,
+        semitons: snapshot.semitons,
+        queuedMusicaId: snapshot.queuedMusicaId,
+        nextBlockOverride: snapshot.nextBlockOverride,
+      });
+    }, 1200);
+
+    return () => window.clearInterval(timer);
+  }, [connected, sendSync, syncEnabled]);
 
   useEffect(() => {
     const ch = supabase.channel(`live:${id}`, {
@@ -897,6 +926,8 @@ export default function ModoLiveNonStop() {
         // ====== NTP: responder PING (se eu for a referência atual) ======
         if (msg.kind === 'PING') {
           if (isReferenceRef.current) {
+            const t1 = Date.now(); // referência recebeu
+            const t2 = Date.now(); // referência vai responder
             await ch.send({
               type: 'broadcast',
               event: 'sync',
@@ -905,7 +936,8 @@ export default function ModoLiveNonStop() {
                 senderId: clientIdRef.current,
                 pingId: msg.pingId,
                 t0: msg.t0,
-                t1: Date.now(), // tempo da referência
+                t1,
+                t2,
               } satisfies SyncMessage,
             });
           }
@@ -916,16 +948,40 @@ export default function ModoLiveNonStop() {
         if (msg.kind === 'PONG') {
           if (msg.pingId !== lastPingIdRef.current) return;
 
-          const t2 = Date.now(); // follower receive time
-          const t0 = msg.t0; // follower send time
-          const t1 = msg.t1; // reference respond time
+          const t3 = Date.now(); // follower recebeu
+          const t0 = msg.t0;
+          const t1 = msg.t1;
+          const t2 = typeof msg.t2 === 'number' ? msg.t2 : msg.t1;
 
-          const offset = t1 - (t0 + t2) / 2; // referenceTime - localTime
-
-          // suaviza para reduzir jitter (EWMA)
-          const alpha = 0.18;
-          const next = clockOffsetRef.current * (1 - alpha) + offset * alpha;
+          // Fórmula NTP completa. Também mede RTT e privilegia as amostras
+          // de menor latência para reduzir assimetria smartphone/desktop.
+          const rtt = Math.max(0, (t3 - t0) - (t2 - t1));
+          const offset = ((t1 - t0) + (t2 - t3)) / 2;
+          const samples = [...clockSamplesRef.current, { offset, rtt }].slice(-10);
+          clockSamplesRef.current = samples;
+          const best = [...samples].sort((a, b) => a.rtt - b.rtt).slice(0, Math.min(3, samples.length));
+          const estimate = best.reduce((sum, sample) => sum + sample.offset, 0) / Math.max(1, best.length);
+          const delta = estimate - clockOffsetRef.current;
+          const alpha = Math.abs(delta) > 120 ? 0.65 : 0.32;
+          const next = clockOffsetRef.current + delta * alpha;
+          clockOffsetRef.current = next;
           setClockOffsetMs(next);
+          setSyncRttMs(rtt);
+
+          // Se o START chegou antes da primeira boa amostra de clock, recalibra
+          // o início do bloco. Durante a execução a correção entra suavemente.
+          const referenceStart = referenceBlockStartEpochMsRef.current;
+          if (referenceStart !== null && blockStartEpochRef.current !== null) {
+            const targetLocalStart = referenceStart - next;
+            if (playbackSnapshotRef.current.autoScroll) {
+              pendingClockCorrectionMsRef.current = Math.max(
+                -300,
+                Math.min(300, targetLocalStart - blockStartEpochRef.current),
+              );
+            } else {
+              blockStartEpochRef.current = targetLocalStart;
+            }
+          }
 
           return;
         }
@@ -957,7 +1013,11 @@ export default function ModoLiveNonStop() {
 
         if (msg.kind === 'STATE') {
           if (isReferenceRef.current) return;
+          isReferenceRef.current = false;
           referenceIdRef.current = msg.maestroId;
+          setIsRhythmReference(false);
+          referenceBlockStartEpochMsRef.current =
+            typeof msg.blockStartEpochMs === 'number' ? msg.blockStartEpochMs : null;
           setSemitons(msg.semitons ?? 0);
 
           if (msg.queuedMusicaId) {
@@ -1053,11 +1113,16 @@ export default function ModoLiveNonStop() {
           setSubChordIndex(0);
 
           if (msg.resume && typeof msg.maestroStartAtMs === 'number') {
+            isReferenceRef.current = false;
+            setIsRhythmReference(false);
+            referenceIdRef.current = msg.maestroId || msg.senderId;
+            referenceBlockStartEpochMsRef.current = msg.maestroStartAtMs;
             const localStartAtMs = msg.maestroStartAtMs - clockOffsetRef.current;
             blockStartEpochRef.current = localStartAtMs;
             await requestWakeLock();
             setAutoScroll(true);
           } else {
+            referenceBlockStartEpochMsRef.current = null;
             blockStartEpochRef.current = null;
           }
           return;
@@ -1067,7 +1132,9 @@ export default function ModoLiveNonStop() {
         if (msg.kind === 'START') {
           // Quem mandou START vira referência atual
           isReferenceRef.current = false;
+          setIsRhythmReference(false);
           referenceIdRef.current = msg.maestroId;
+          referenceBlockStartEpochMsRef.current = msg.maestroStartAtMs;
 
           setSemitons(msg.semitons ?? 0);
           // A preferência visual é individual. Um START sincroniza a música,
@@ -1088,6 +1155,24 @@ export default function ModoLiveNonStop() {
           // ✅ converter start do relógio da referência para relógio local
           const offset = clockOffsetRef.current; // ref - local
           const localStartAtMs = msg.maestroStartAtMs - offset;
+          // Guardamos o alvo desde já; novos PING/PONG podem refiná-lo antes
+          // da contagem terminar, sem esperar outro START.
+          blockStartEpochRef.current = localStartAtMs;
+
+          // Não esperamos o loop periódico: calibra o relógio imediatamente
+          // para BPM alto ou redes onde 8 beats ainda seriam menos de 2 s.
+          const immediatePingId = `${clientIdRef.current}-${Date.now()}-start`;
+          lastPingIdRef.current = immediatePingId;
+          void ch.send({
+            type: 'broadcast',
+            event: 'sync',
+            payload: {
+              kind: 'PING',
+              senderId: clientIdRef.current,
+              pingId: immediatePingId,
+              t0: Date.now(),
+            } satisfies SyncMessage,
+          });
 
           const now = Date.now();
           const msToStart = Math.max(0, localStartAtMs - now);
@@ -1116,10 +1201,11 @@ export default function ModoLiveNonStop() {
                 setCountdown(null);
 
                 const now2 = Date.now();
-                const wait = Math.max(0, localStartAtMs - now2);
+                const refinedStartAtMs = blockStartEpochRef.current ?? localStartAtMs;
+                const wait = Math.max(0, refinedStartAtMs - now2);
                 if (wait > 0) await new Promise((r) => setTimeout(r, wait));
 
-                blockStartEpochRef.current = localStartAtMs;
+                blockStartEpochRef.current = refinedStartAtMs;
                 await requestWakeLock();
                 setAutoScroll(true);
                 return;
@@ -1180,6 +1266,7 @@ export default function ModoLiveNonStop() {
 
     // Quem disparou START vira referência automaticamente (sem UI)
     isReferenceRef.current = true;
+    setIsRhythmReference(true);
     referenceIdRef.current = clientIdRef.current;
 
     const beatMs = 60000 / Math.max(30, Math.min(300, Number(effectiveBpm || 120)));
@@ -1197,6 +1284,7 @@ export default function ModoLiveNonStop() {
 
     // tempo no MEU relógio (referência)
     const maestroStartAtMs = Date.now() + beatMs * leadBeats;
+    referenceBlockStartEpochMsRef.current = maestroStartAtMs;
 
     await sendSync({
       kind: 'START',
@@ -1253,12 +1341,6 @@ export default function ModoLiveNonStop() {
       await startShowWithCountdown();
     }
   }, [lockUI, autoScroll, countdown, pauseShow, sendSync, startShowWithCountdown]);
-
-  // ✅ "INICIAR BLOCO"
-  const restartCurrentBlock = useCallback(() => {
-    if (lockUI) return;
-    resetTimeForNewBlock();
-  }, [lockUI, resetTimeForNewBlock]);
 
   const clearNextBlockOverrideLocal = useCallback(() => {
     nextBlockOverrideRef.current = null;
@@ -1387,14 +1469,29 @@ export default function ModoLiveNonStop() {
 
       const wasPlaying = autoScroll;
       const musicaId = musicaAtual?.id ? String(musicaAtual.id) : undefined;
-      const maestroStartAtMs = wasPlaying ? Date.now() + 220 : undefined;
+      const referenceId = referenceIdRef.current || clientIdRef.current;
+      const referenceNow = isReferenceRef.current ? Date.now() : Date.now() + clockOffsetRef.current;
+      const maestroStartAtMs = wasPlaying ? referenceNow + 260 : undefined;
+      const localStartAtMs =
+        wasPlaying && maestroStartAtMs
+          ? isReferenceRef.current
+            ? maestroStartAtMs
+            : maestroStartAtMs - clockOffsetRef.current
+          : null;
+
+      // Saltos manuais continuam no mesmo domínio de relógio do aparelho de
+      // ritmo. Assim o cantor pode trocar de bloco sem "roubar" a referência
+      // temporal do baterista.
+      if (wasPlaying && maestroStartAtMs) {
+        referenceBlockStartEpochMsRef.current = maestroStartAtMs;
+      }
 
       clearNextBlockOverrideLocal();
       setBlocoAtivo(nextBlock);
       setProgresso(0);
       subChordIndexRef.current = 0;
       setSubChordIndex(0);
-      blockStartEpochRef.current = maestroStartAtMs ?? null;
+      blockStartEpochRef.current = localStartAtMs;
 
       if (wasPlaying && maestroStartAtMs) {
         await requestWakeLock();
@@ -1408,6 +1505,7 @@ export default function ModoLiveNonStop() {
         blocoAtivo: nextBlock,
         musicaId,
         resume: wasPlaying,
+        maestroId: wasPlaying ? referenceId : undefined,
         maestroStartAtMs,
       });
     },
@@ -1416,6 +1514,13 @@ export default function ModoLiveNonStop() {
 
   const prevBlock = useCallback(() => void saltarParaBloco(blocoAtivo - 1), [blocoAtivo, saltarParaBloco]);
   const nextBlock = useCallback(() => void saltarParaBloco(blocoAtivo + 1), [blocoAtivo, saltarParaBloco]);
+
+  // Reiniciar bloco agora é uma ação sincronizada e preserva a referência
+  // de ritmo atual (por exemplo, o aparelho do baterista).
+  const restartCurrentBlock = useCallback(() => {
+    if (lockUI) return;
+    void saltarParaBloco(blocoAtivo);
+  }, [blocoAtivo, lockUI, saltarParaBloco]);
 
   const prevSong = useCallback(async () => {
     if (lockUI) return;
@@ -1489,7 +1594,10 @@ export default function ModoLiveNonStop() {
 
       const now = Date.now();
 
-      if (blockStartEpochRef.current === null) blockStartEpochRef.current = now;
+      if (blockStartEpochRef.current === null) {
+        blockStartEpochRef.current = now;
+        if (isReferenceRef.current) referenceBlockStartEpochMsRef.current = now;
+      }
 
       // Ao reconectar, corrige drift aos poucos. Nunca dá um salto visual brusco.
       if (blockStartEpochRef.current !== null && Math.abs(pendingClockCorrectionMsRef.current) >= 0.5) {
@@ -1498,11 +1606,7 @@ export default function ModoLiveNonStop() {
         pendingClockCorrectionMsRef.current -= correctionStep;
       }
 
-      let elapsed = now - blockStartEpochRef.current + visualTimingOffsetMs;
-      if (elapsed > duracao * 1.5) {
-        blockStartEpochRef.current = now;
-        elapsed = 0;
-      }
+      const elapsed = Math.max(0, now - blockStartEpochRef.current + visualTimingOffsetMs);
 
       const progress01 = Math.max(0, Math.min(1, elapsed / duracao));
 
@@ -1520,6 +1624,23 @@ export default function ModoLiveNonStop() {
       }
 
       if (progress01 >= 1) {
+        // Nunca zera o relógio em `now` na troca automática. Cada dispositivo
+        // preserva o MESMO epoch absoluto do bloco anterior + sua duração,
+        // evitando acumular um frame de atraso a cada transição.
+        const scheduledNextStart = blockStartEpochRef.current + duracao;
+        const nextReferenceStart =
+          referenceBlockStartEpochMsRef.current !== null
+            ? referenceBlockStartEpochMsRef.current + duracao
+            : isReferenceRef.current
+              ? scheduledNextStart
+              : null;
+
+        const applyScheduledNextStart = () => {
+          blockStartEpochRef.current = scheduledNextStart;
+          referenceBlockStartEpochMsRef.current = nextReferenceStart;
+          pendingClockCorrectionMsRef.current = 0;
+        };
+
         const manualNextBlock = nextBlockOverrideRef.current;
         if (manualNextBlock !== null && manualNextBlock >= 0 && manualNextBlock < estruturaAtual.length) {
           // Override de UMA transição: não altera a estrutura salva.
@@ -1529,7 +1650,7 @@ export default function ModoLiveNonStop() {
           setProgresso(0);
           lastProgressUiRef.current = now;
           setBlocoAtivo(manualNextBlock);
-          blockStartEpochRef.current = now;
+          applyScheduledNextStart();
           subChordIndexRef.current = 0;
           setSubChordIndex(0);
         } else if (blocoAtivo < estruturaAtual.length - 1) {
@@ -1541,7 +1662,7 @@ export default function ModoLiveNonStop() {
           setProgresso(0);
           lastProgressUiRef.current = now;
           setBlocoAtivo((p) => p + 1);
-          blockStartEpochRef.current = now;
+          applyScheduledNextStart();
           subChordIndexRef.current = 0;
           setSubChordIndex(0);
         } else if (queuedIndexRef.current !== null && queuedIndexRef.current !== indexMusicaAtual) {
@@ -1557,7 +1678,7 @@ export default function ModoLiveNonStop() {
           activeRunLoggedRef.current = false;
           setIndexMusicaAtual(qIndex);
           setBlocoAtivo(0);
-          blockStartEpochRef.current = now;
+          applyScheduledNextStart();
           subChordIndexRef.current = 0;
           setSubChordIndex(0);
         } else if (indexMusicaAtual < musicas.length - 1) {
@@ -1569,7 +1690,7 @@ export default function ModoLiveNonStop() {
           setNextBlockOverride(null);
           setIndexMusicaAtual((p) => p + 1);
           setBlocoAtivo(0);
-          blockStartEpochRef.current = now;
+          applyScheduledNextStart();
           subChordIndexRef.current = 0;
           setSubChordIndex(0);
         } else {
@@ -2192,10 +2313,24 @@ export default function ModoLiveNonStop() {
                   ? 'border-white/10 bg-white/5 text-zinc-400'
                   : 'border-amber-500/25 bg-amber-500/10 text-amber-300'
               )}
-              title={connected ? 'Realtime conectado' : networkOnline ? 'Sem Realtime — modo local' : 'Sem internet — música continua localmente'}
+              title={
+                connected
+                  ? isRhythmReference
+                    ? 'Este aparelho é a referência de ritmo. Ideal para o baterista iniciar o Live.'
+                    : `Seguindo a referência de ritmo${syncRttMs !== null ? ` • RTT ${Math.round(syncRttMs)} ms` : ''}`
+                  : networkOnline
+                    ? 'Sem Realtime — modo local'
+                    : 'Sem internet — música continua localmente'
+              }
             >
               {connected ? <Wifi size={12} /> : <WifiOff size={12} />}
-              {connected ? 'SYNC' : networkOnline ? 'LOCAL' : 'OFFLINE'}
+              {connected
+                ? isRhythmReference
+                  ? 'RITMO'
+                  : `SYNC${syncRttMs !== null ? ` ${Math.round(syncRttMs)}ms` : ''}`
+                : networkOnline
+                  ? 'LOCAL'
+                  : 'OFFLINE'}
             </div>
             {loadedFromCache && (
               <div className="px-2 py-1 rounded-lg border border-amber-500/20 bg-amber-500/10 text-[8px] font-black uppercase tracking-wider text-amber-300">

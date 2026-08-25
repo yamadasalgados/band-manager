@@ -259,7 +259,7 @@ export default function SongStageRenderer({
         )}
       >
         <div
-          className="w-full max-w-5xl mx-auto px-4 sm:px-8 lg:px-12 space-y-8 sm:space-y-12"
+          className="w-full max-w-6xl mx-auto px-4 sm:px-8 lg:px-12 space-y-8 sm:space-y-12"
           style={{ paddingTop: '28vh', paddingBottom: '38vh' }}
         >
           {parsedBlocks.map((block, blockIndex) => {
@@ -337,9 +337,10 @@ export default function SongStageRenderer({
         )}
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto px-4 sm:px-8 lg:px-12 py-3 sm:py-5 flex items-center">
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 sm:px-8 lg:px-12 flex flex-col">
+        <div className="my-auto w-full py-3 sm:py-5">
         {viewMode === 'chords' ? (
-          <div className="w-full max-w-5xl mx-auto flex flex-wrap justify-center gap-x-6 sm:gap-x-8 gap-y-4 items-center">
+          <div className="w-full max-w-6xl mx-auto flex flex-wrap justify-center gap-x-6 sm:gap-x-8 gap-y-4 items-center">
             {currentBlock?.lines.slice(0, currentBlock.duration).map((line, lineIndex) => {
               const names = chordCellNames(line.chordCell).map((chord) => formatStageChord(chord, semitones, harmonyNotation, keySignature));
               const active = lineIndex === safeMeasureIndex;
@@ -357,8 +358,49 @@ export default function SongStageRenderer({
               );
             })}
           </div>
+        ) : viewMode === 'both' && currentBlock && !currentBlock.lyricsSynced ? (
+          <div className="w-full max-w-6xl mx-auto space-y-5 sm:space-y-7">
+            <div className="flex flex-wrap items-end justify-center gap-2 sm:gap-3">
+              {currentBlock.lines.slice(0, currentBlock.duration).map((line, lineIndex) => {
+                const names = chordCellNames(line.chordCell).map((chord) =>
+                  formatStageChord(chord, semitones, harmonyNotation, keySignature),
+                );
+                const active = lineIndex === safeMeasureIndex;
+                return (
+                  <div
+                    key={`free-chord-${lineIndex}`}
+                    className={cn(
+                      'min-w-[72px] sm:min-w-[92px] rounded-2xl border px-3 py-2 text-center transition-all duration-150',
+                      active
+                        ? 'border-blue-400/40 bg-blue-500/10 shadow-[0_0_24px_rgba(59,130,246,0.10)]'
+                        : 'border-white/5 bg-white/[0.025]',
+                    )}
+                  >
+                    <p className="text-[8px] font-black uppercase tracking-widest text-zinc-600 mb-1">
+                      {lineIndex + 1}
+                    </p>
+                    <p
+                      style={{ fontSize: active ? scaledClamp(25, 4.2, 42, fontScale) : scaledClamp(20, 3.2, 32, fontScale) }}
+                      className={cn('font-mono font-black leading-none', active ? 'text-yellow-300' : 'text-yellow-500/45')}
+                    >
+                      {names.length ? names.join(' / ') : '—'}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="rounded-2xl border border-white/5 bg-black/15 px-4 sm:px-6 py-4 sm:py-5">
+              <div
+                style={{ fontSize: scaledClamp(20, 3, 34, fontScale) }}
+                className="font-mono font-bold leading-[1.35] whitespace-pre-wrap break-words text-zinc-100"
+              >
+                {currentBlock.lines.map((line) => line.lyric).filter((line) => line.trim()).join('\n') || '\u00A0'}
+              </div>
+            </div>
+          </div>
         ) : (
-          <div className="w-full max-w-5xl mx-auto space-y-1 sm:space-y-2">
+          <div className="w-full max-w-6xl mx-auto space-y-1 sm:space-y-2">
             {currentBlock?.lines.map((line, lineIndex) => {
               const timedLine = lineIndex < currentBlock.duration;
               const active = timedLine && lineIndex === safeMeasureIndex;
@@ -385,11 +427,12 @@ export default function SongStageRenderer({
             })}
           </div>
         )}
+        </div>
       </div>
 
       {showNextHint && (
         <div className="border-t border-white/5 bg-black/20 px-4 sm:px-8 py-2.5 sm:py-3">
-          <div className="max-w-5xl mx-auto flex items-start gap-4 sm:gap-6 opacity-45">
+          <div className="max-w-6xl mx-auto flex items-start gap-4 sm:gap-6 opacity-45">
             <span className="shrink-0 px-2 py-1 rounded-lg bg-white/5 text-[9px] sm:text-[10px] font-black uppercase tracking-widest text-zinc-300">
               {nextBlock ? nextBlock.label : 'FIM'}
             </span>
