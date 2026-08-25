@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { useParams, useRouter } from 'next/navigation';
 import SongStageRenderer from '@/components/SongStageRenderer';
+import type { StageHarmonyNotation } from '@/lib/songStage';
 
 type ViewMode = 'both' | 'chords' | 'lyrics';
 type PresentationMode = 'slides' | 'scroll';
@@ -52,6 +53,7 @@ type LiveDisplayPreferences = {
   focusRatio: number;
   visualTimingOffsetMs: number;
   showMemberNotes: boolean;
+  harmonyNotation: StageHarmonyNotation;
 };
 
 type PermanentSongStats = {
@@ -158,6 +160,7 @@ type SyncMessage =
       maestroStartAtMs?: number;
     }
   | { kind: 'QUEUE'; senderId: string; musicaId: string | null }
+  | { kind: 'BLOCK_QUEUE'; senderId: string; blockIndex: number | null }
   | { kind: 'STATE_REQUEST'; senderId: string }
   | {
       kind: 'STATE';
@@ -170,6 +173,7 @@ type SyncMessage =
       bpm: number;
       semitons: number;
       queuedMusicaId?: string | null;
+      nextBlockOverride?: number | null;
     }
   | { kind: 'PING'; senderId: string; pingId: string; t0: number } // t0 no relógio do follower
   | { kind: 'PONG'; senderId: string; pingId: string; t0: number; t1: number }; // t1 no relógio do “referência”
@@ -306,6 +310,7 @@ export default function ModoLiveNonStop() {
   const [focusRatio, setFocusRatio] = useState(0.34);
   const [visualTimingOffsetMs, setVisualTimingOffsetMs] = useState(0);
   const [showMemberNotes, setShowMemberNotes] = useState(true);
+  const [harmonyNotation, setHarmonyNotation] = useState<StageHarmonyNotation>('chords');
   const [preferencesReady, setPreferencesReady] = useState(false);
   const preferencesStorageKeyRef = useRef('');
   const [bpmOverride] = useState<number | null>(null);
@@ -315,6 +320,9 @@ export default function ModoLiveNonStop() {
   const [quickTab, setQuickTab] = useState<QuickTab>('songs');
   const [queuedMusicaId, setQueuedMusicaId] = useState<string | null>(null);
   const queuedIndexRef = useRef<number | null>(null);
+  const [showNextBlockMenu, setShowNextBlockMenu] = useState(false);
+  const [nextBlockOverride, setNextBlockOverride] = useState<number | null>(null);
+  const nextBlockOverrideRef = useRef<number | null>(null);
   const [showHistory, setShowHistory] = useState<ShowHistoryEntry[]>([]);
   const activeRunLoggedRef = useRef(false);
   const lastPlaybackIndexRef = useRef(-1);
@@ -349,6 +357,7 @@ export default function ModoLiveNonStop() {
     effectiveBpm: 120,
     semitons: 0,
     queuedMusicaId: null as string | null,
+    nextBlockOverride: null as number | null,
   });
 
   // Rolagem da cifra/letra
@@ -411,6 +420,7 @@ export default function ModoLiveNonStop() {
       if (typeof saved?.focusRatio === 'number') setFocusRatio(Math.max(0.2, Math.min(0.55, saved.focusRatio)));
       if (typeof saved?.visualTimingOffsetMs === 'number') setVisualTimingOffsetMs(Math.max(-1500, Math.min(1500, saved.visualTimingOffsetMs)));
       if (typeof saved?.showMemberNotes === 'boolean') setShowMemberNotes(saved.showMemberNotes);
+      if (saved?.harmonyNotation === 'chords' || saved?.harmonyNotation === 'degrees') setHarmonyNotation(saved.harmonyNotation);
     } catch {
       // Mantém os padrões caso a preferência esteja corrompida.
     } finally {
@@ -429,12 +439,13 @@ export default function ModoLiveNonStop() {
         focusRatio,
         visualTimingOffsetMs,
         showMemberNotes,
+        harmonyNotation,
       };
       window.localStorage.setItem(preferencesStorageKeyRef.current, JSON.stringify(payload));
     } catch {
       // O Live continua funcionando mesmo se o navegador bloquear storage.
     }
-  }, [focusRatio, fontScale, preferencesReady, presentationMode, showMemberNotes, viewMode, visualTimingOffsetMs]);
+  }, [focusRatio, fontScale, harmonyNotation, preferencesReady, presentationMode, showMemberNotes, viewMode, visualTimingOffsetMs]);
 
   // ============== HELPERS ==============
   const cn = (...p: Array<string | false | null | undefined>) => p.filter(Boolean).join(' ');
@@ -442,6 +453,10 @@ export default function ModoLiveNonStop() {
   useEffect(() => {
     musicasRef.current = musicas;
   }, [musicas]);
+
+  useEffect(() => {
+    nextBlockOverrideRef.current = nextBlockOverride;
+  }, [nextBlockOverride]);
 
   const showStageNotice = useCallback((message: string) => {
     setStageNotice(message);
@@ -480,10 +495,15 @@ export default function ModoLiveNonStop() {
   const blocoAtual = useMemo(() => estruturaAtual?.[blocoAtivo]?.bloco || null, [estruturaAtual, blocoAtivo]);
 
   const blocoSeguinte = useMemo(() => {
+    if (nextBlockOverride !== null && nextBlockOverride >= 0 && nextBlockOverride < estruturaAtual.length) {
+      return estruturaAtual[nextBlockOverride]?.bloco || null;
+    }
     if (blocoAtivo < estruturaAtual.length - 1) return estruturaAtual[blocoAtivo + 1]?.bloco;
     if (indexMusicaAtual < musicas.length - 1) return musicas[indexMusicaAtual + 1]?.estrutura?.[0]?.bloco;
     return null;
-  }, [blocoAtivo, estruturaAtual, indexMusicaAtual, musicas]);
+  }, [blocoAtivo, estruturaAtual, indexMusicaAtual, musicas, nextBlockOverride]);
+
+  const nextBlockIsManual = nextBlockOverride !== null;
 
   const effectiveBpm = useMemo(() => {
     const base = Number(musicaAtual?.bpm || 120) || 120;
@@ -501,8 +521,9 @@ export default function ModoLiveNonStop() {
       effectiveBpm,
       semitons,
       queuedMusicaId,
+      nextBlockOverride,
     };
-  }, [autoScroll, blocoAtivo, effectiveBpm, indexMusicaAtual, musicaAtual?.id, queuedMusicaId, semitons]);
+  }, [autoScroll, blocoAtivo, effectiveBpm, indexMusicaAtual, musicaAtual?.id, nextBlockOverride, queuedMusicaId, semitons]);
 
   const queuedMusica = useMemo(() => {
     if (!queuedMusicaId) return null;
@@ -927,6 +948,7 @@ export default function ModoLiveNonStop() {
                 bpm: snapshot.effectiveBpm,
                 semitons: snapshot.semitons,
                 queuedMusicaId: snapshot.queuedMusicaId,
+                nextBlockOverride: snapshot.nextBlockOverride,
               } satisfies SyncMessage,
             });
           }
@@ -948,6 +970,10 @@ export default function ModoLiveNonStop() {
             queuedIndexRef.current = null;
             setQueuedMusicaId(null);
           }
+
+          const restoredNextBlock = typeof msg.nextBlockOverride === 'number' ? msg.nextBlockOverride : null;
+          nextBlockOverrideRef.current = restoredNextBlock;
+          setNextBlockOverride(restoredNextBlock);
 
           if (!msg.musicaId) return;
           const targetIndex = await ensureMusicaDisponivel(String(msg.musicaId));
@@ -997,6 +1023,14 @@ export default function ModoLiveNonStop() {
           return;
         }
 
+        // ====== PRÓXIMO BLOCO (override de uma única transição) ======
+        if (msg.kind === 'BLOCK_QUEUE') {
+          const target = typeof msg.blockIndex === 'number' ? msg.blockIndex : null;
+          nextBlockOverrideRef.current = target;
+          setNextBlockOverride(target);
+          return;
+        }
+
         // ====== PAUSE ======
         if (msg.kind === 'PAUSE') {
           await pauseShow();
@@ -1012,6 +1046,8 @@ export default function ModoLiveNonStop() {
 
           setIndexMusicaAtual(targetIndex);
           setBlocoAtivo(msg.blocoAtivo);
+          nextBlockOverrideRef.current = null;
+          setNextBlockOverride(null);
           setProgresso(0);
           subChordIndexRef.current = 0;
           setSubChordIndex(0);
@@ -1041,6 +1077,8 @@ export default function ModoLiveNonStop() {
             : msg.indexMusicaAtual;
           setIndexMusicaAtual(targetStartIndex);
           setBlocoAtivo(msg.blocoAtivo);
+          nextBlockOverrideRef.current = null;
+          setNextBlockOverride(null);
           setProgresso(0);
           subChordIndexRef.current = 0;
           setSubChordIndex(0);
@@ -1222,12 +1260,19 @@ export default function ModoLiveNonStop() {
     resetTimeForNewBlock();
   }, [lockUI, resetTimeForNewBlock]);
 
+  const clearNextBlockOverrideLocal = useCallback(() => {
+    nextBlockOverrideRef.current = null;
+    setNextBlockOverride(null);
+    setShowNextBlockMenu(false);
+  }, []);
+
   const saltarParaIndex = useCallback(
     async (nextIndex: number) => {
       if (lockUI) return;
       if (nextIndex < 0 || nextIndex >= musicas.length) return;
 
       await pauseShow();
+      clearNextBlockOverrideLocal();
       setMenuAberto(false);
       activeRunLoggedRef.current = false;
       if (queuedIndexRef.current === nextIndex) clearQueue();
@@ -1245,7 +1290,7 @@ export default function ModoLiveNonStop() {
         blocoAtivo: 0,
       });
     },
-    [clearQueue, lockUI, musicas.length, pauseShow, sendSync]
+    [clearNextBlockOverrideLocal, clearQueue, lockUI, musicas.length, pauseShow, sendSync]
   );
 
   const saltarParaMusicaRapida = useCallback(
@@ -1254,6 +1299,7 @@ export default function ModoLiveNonStop() {
       setQuickLoadingId(String(musicaId));
       try {
         await pauseShow();
+        clearNextBlockOverrideLocal();
         const nextIndex = await ensureMusicaDisponivel(String(musicaId));
         setMenuAberto(false);
         activeRunLoggedRef.current = false;
@@ -1280,7 +1326,7 @@ export default function ModoLiveNonStop() {
         setQuickLoadingId(null);
       }
     },
-    [bumpPedido, clearQueue, ensureMusicaDisponivel, lockUI, pauseShow, sendSync]
+    [bumpPedido, clearNextBlockOverrideLocal, clearQueue, ensureMusicaDisponivel, lockUI, pauseShow, sendSync]
   );
 
   const colocarComoProxima = useCallback(
@@ -1310,6 +1356,31 @@ export default function ModoLiveNonStop() {
     [bumpPedido, ensureMusicaDisponivel, lockUI, sendSync, showStageNotice]
   );
 
+  const agendarProximoBloco = useCallback(
+    async (target: number | null) => {
+      if (lockUI) return;
+      if (target !== null && (target < 0 || target >= estruturaAtual.length)) return;
+
+      nextBlockOverrideRef.current = target;
+      setNextBlockOverride(target);
+      setShowNextBlockMenu(false);
+
+      if (target === null) {
+        showStageNotice('Próximo bloco voltou à sequência normal');
+      } else {
+        const label = blockLabel(estruturaAtual[target]?.bloco);
+        showStageNotice(`Próximo bloco: ${label}`);
+      }
+
+      await sendSync({
+        kind: 'BLOCK_QUEUE',
+        senderId: clientIdRef.current,
+        blockIndex: target,
+      });
+    },
+    [estruturaAtual, lockUI, sendSync, showStageNotice]
+  );
+
   const saltarParaBloco = useCallback(
     async (nextBlock: number) => {
       if (lockUI || nextBlock < 0 || nextBlock >= estruturaAtual.length) return;
@@ -1318,6 +1389,7 @@ export default function ModoLiveNonStop() {
       const musicaId = musicaAtual?.id ? String(musicaAtual.id) : undefined;
       const maestroStartAtMs = wasPlaying ? Date.now() + 220 : undefined;
 
+      clearNextBlockOverrideLocal();
       setBlocoAtivo(nextBlock);
       setProgresso(0);
       subChordIndexRef.current = 0;
@@ -1339,7 +1411,7 @@ export default function ModoLiveNonStop() {
         maestroStartAtMs,
       });
     },
-    [autoScroll, estruturaAtual.length, indexMusicaAtual, lockUI, musicaAtual?.id, requestWakeLock, sendSync]
+    [autoScroll, clearNextBlockOverrideLocal, estruturaAtual.length, indexMusicaAtual, lockUI, musicaAtual?.id, requestWakeLock, sendSync]
   );
 
   const prevBlock = useCallback(() => void saltarParaBloco(blocoAtivo - 1), [blocoAtivo, saltarParaBloco]);
@@ -1351,6 +1423,7 @@ export default function ModoLiveNonStop() {
 
     const nextIndex = indexMusicaAtual - 1;
     await pauseShow();
+    clearNextBlockOverrideLocal();
     setIndexMusicaAtual(nextIndex);
     setBlocoAtivo(0);
     blockStartEpochRef.current = null;
@@ -1364,7 +1437,7 @@ export default function ModoLiveNonStop() {
       indexMusicaAtual: nextIndex,
       blocoAtivo: 0,
     });
-  }, [lockUI, indexMusicaAtual, pauseShow, sendSync]);
+  }, [clearNextBlockOverrideLocal, lockUI, indexMusicaAtual, pauseShow, sendSync]);
 
   const nextSong = useCallback(async () => {
     if (lockUI) return;
@@ -1374,6 +1447,7 @@ export default function ModoLiveNonStop() {
     if (nextIndex < 0 || nextIndex >= musicas.length || nextIndex === indexMusicaAtual) return;
 
     await pauseShow();
+    clearNextBlockOverrideLocal();
     activeRunLoggedRef.current = false;
     setIndexMusicaAtual(nextIndex);
     setBlocoAtivo(0);
@@ -1395,7 +1469,7 @@ export default function ModoLiveNonStop() {
       blocoAtivo: 0,
       musicaId: targetId,
     });
-  }, [clearQueue, indexMusicaAtual, lockUI, musicas, pauseShow, sendSync]);
+  }, [clearNextBlockOverrideLocal, clearQueue, indexMusicaAtual, lockUI, musicas, pauseShow, sendSync]);
 
   // ================== ENGINE RAF ==================
   useEffect(() => {
@@ -1446,7 +1520,19 @@ export default function ModoLiveNonStop() {
       }
 
       if (progress01 >= 1) {
-        if (blocoAtivo < estruturaAtual.length - 1) {
+        const manualNextBlock = nextBlockOverrideRef.current;
+        if (manualNextBlock !== null && manualNextBlock >= 0 && manualNextBlock < estruturaAtual.length) {
+          // Override de UMA transição: não altera a estrutura salva.
+          // Ex.: Refrão -> Refrão (manual) -> segue naturalmente para Intro.
+          nextBlockOverrideRef.current = null;
+          setNextBlockOverride(null);
+          setProgresso(0);
+          lastProgressUiRef.current = now;
+          setBlocoAtivo(manualNextBlock);
+          blockStartEpochRef.current = now;
+          subChordIndexRef.current = 0;
+          setSubChordIndex(0);
+        } else if (blocoAtivo < estruturaAtual.length - 1) {
           // IMPORTANTE: zera o progresso no MESMO render em que troca o bloco.
           // Sem isso, por alguns frames o bloco novo herdava progresso=100 do
           // bloco anterior. A rolagem calculava o alvo como se o bloco novo
@@ -1463,6 +1549,8 @@ export default function ModoLiveNonStop() {
           const qIndex = queuedIndexRef.current;
           queuedIndexRef.current = null;
           setQueuedMusicaId(null);
+          nextBlockOverrideRef.current = null;
+          setNextBlockOverride(null);
           if (isReferenceRef.current) void sendSync({ kind: 'QUEUE', senderId: clientIdRef.current, musicaId: null });
           setProgresso(0);
           lastProgressUiRef.current = now;
@@ -1477,6 +1565,8 @@ export default function ModoLiveNonStop() {
           setProgresso(0);
           lastProgressUiRef.current = now;
           activeRunLoggedRef.current = false;
+          nextBlockOverrideRef.current = null;
+          setNextBlockOverride(null);
           setIndexMusicaAtual((p) => p + 1);
           setBlocoAtivo(0);
           blockStartEpochRef.current = now;
@@ -2192,6 +2282,33 @@ export default function ModoLiveNonStop() {
           <div className="flex items-center gap-1 bg-white/5 border border-white/10 rounded-xl p-1">
             <button
               disabled={lockUI}
+              onClick={() => setHarmonyNotation('chords')}
+              className={cn(
+                'min-h-9 px-3 rounded-lg text-[9px] sm:text-[10px] font-black uppercase tracking-widest transition-all',
+                harmonyNotation === 'chords' ? 'bg-yellow-500/15 text-yellow-300' : 'text-zinc-500 hover:text-zinc-300',
+                lockUI ? 'opacity-40' : ''
+              )}
+              title="Mostrar nomes dos acordes"
+            >
+              Acordes
+            </button>
+            <button
+              disabled={lockUI || !String(musicaAtual?.tom || '').trim()}
+              onClick={() => setHarmonyNotation('degrees')}
+              className={cn(
+                'min-h-9 px-3 rounded-lg text-[9px] sm:text-[10px] font-black uppercase tracking-widest transition-all disabled:opacity-30',
+                harmonyNotation === 'degrees' ? 'bg-violet-500/15 text-violet-300' : 'text-zinc-500 hover:text-zinc-300',
+                lockUI ? 'opacity-40' : ''
+              )}
+              title={String(musicaAtual?.tom || '').trim() ? 'Mostrar graus 1–7' : 'Defina o tom da música para usar graus'}
+            >
+              Graus
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1 bg-white/5 border border-white/10 rounded-xl p-1">
+            <button
+              disabled={lockUI}
               onClick={() => setPresentationMode('slides')}
               className={cn(
                 'min-h-9 px-3 rounded-lg text-[9px] sm:text-[10px] font-black uppercase tracking-widest transition-all',
@@ -2260,6 +2377,8 @@ export default function ModoLiveNonStop() {
           viewMode={viewMode}
           presentationMode={presentationMode}
           semitones={semitons}
+          harmonyNotation={harmonyNotation}
+          keySignature={String(musicaAtual?.tom || '')}
           fontScale={fontScale}
           focusRatio={focusRatio}
           autoScroll={autoScroll}
@@ -2311,7 +2430,9 @@ export default function ModoLiveNonStop() {
             </p>
             <p className="font-black italic uppercase text-[10px] truncate leading-none">{musicaAtual?.titulo || '—'}</p>
             <p className={cn('mt-1 text-[8px] font-black uppercase tracking-wider truncate', queuedMusica ? 'text-amber-200' : 'text-blue-200/70')}>
-              {queuedMusica
+              {nextBlockIsManual
+                ? `Próximo: ${blocoSeguinte ? blockLabel(blocoSeguinte) : 'Fim'} • manual`
+                : queuedMusica
                 ? `Na fila: ${queuedMusica.titulo || 'música preparada'}`
                 : `Próximo: ${blocoSeguinte ? blockLabel(blocoSeguinte) : 'Fim'}`}
             </p>
@@ -2324,6 +2445,19 @@ export default function ModoLiveNonStop() {
 
         {/* Direita */}
         <div className="flex items-center gap-2 sm:gap-3">
+          <button
+            disabled={lockUI || estruturaAtual.length === 0}
+            onClick={() => setShowNextBlockMenu(true)}
+            className={cn(
+              'min-h-11 px-3 rounded-2xl border text-[9px] font-black uppercase tracking-wider disabled:opacity-20',
+              nextBlockIsManual
+                ? 'border-amber-400/30 bg-amber-400/15 text-amber-200'
+                : 'border-violet-400/20 bg-violet-400/10 text-violet-200'
+            )}
+            title="Escolher apenas o próximo bloco sem alterar a sequência salva"
+          >
+            Próx. bloco
+          </button>
           <button
             disabled={lockUI || blocoAtivo <= 0}
             onClick={prevBlock}
@@ -2364,6 +2498,67 @@ export default function ModoLiveNonStop() {
           </button>
         </div>
       </footer>
+
+      {/* PRÓXIMO BLOCO — override de uma única transição */}
+      {showNextBlockMenu && (
+        <div className="fixed inset-0 z-[210] bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-3 sm:p-6" onClick={() => setShowNextBlockMenu(false)}>
+          <div className="w-full max-w-2xl rounded-[2rem] border border-white/10 bg-zinc-950 shadow-2xl overflow-hidden" onClick={(event) => event.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[9px] font-black uppercase tracking-[0.18em] text-violet-300">Utilidade rápida</p>
+                <h2 className="mt-1 text-lg sm:text-xl font-black uppercase">Escolher próximo bloco</h2>
+                <p className="mt-1 text-xs text-zinc-500">Vale só para a próxima transição. A estrutura original da música não é alterada.</p>
+              </div>
+              <button onClick={() => setShowNextBlockMenu(false)} className="p-2 rounded-xl bg-white/5 text-zinc-400"><XCircle size={20} /></button>
+            </div>
+
+            <div className="p-4 sm:p-5 max-h-[62vh] overflow-y-auto">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  onClick={() => void agendarProximoBloco(blocoAtivo)}
+                  className="min-h-14 rounded-2xl border border-amber-400/25 bg-amber-400/10 px-4 text-left hover:bg-amber-400/15"
+                >
+                  <span className="block text-[9px] font-black uppercase tracking-widest text-amber-300">↻ Repetir atual</span>
+                  <span className="block mt-1 font-black text-white">{blockLabel(blocoAtual)}</span>
+                </button>
+
+                <button
+                  onClick={() => void agendarProximoBloco(null)}
+                  className="min-h-14 rounded-2xl border border-white/10 bg-white/5 px-4 text-left hover:bg-white/10"
+                >
+                  <span className="block text-[9px] font-black uppercase tracking-widest text-zinc-500">Sequência normal</span>
+                  <span className="block mt-1 font-black text-white">Cancelar alteração manual</span>
+                </button>
+
+                {estruturaAtual.map((entry: any, blockIndex: number) => {
+                  const label = blockLabel(entry?.bloco);
+                  const naturalNext = blockIndex === blocoAtivo + 1;
+                  const selected = nextBlockOverride === blockIndex;
+                  return (
+                    <button
+                      key={`next-block-${blockIndex}-${String(entry?.bloco?.id || label)}`}
+                      onClick={() => void agendarProximoBloco(blockIndex)}
+                      className={cn(
+                        'min-h-14 rounded-2xl border px-4 text-left transition-all',
+                        selected
+                          ? 'border-violet-400/40 bg-violet-400/15'
+                          : naturalNext
+                          ? 'border-blue-400/20 bg-blue-400/10 hover:bg-blue-400/15'
+                          : 'border-white/10 bg-white/[0.035] hover:bg-white/[0.07]'
+                      )}
+                    >
+                      <span className={cn('block text-[9px] font-black uppercase tracking-widest', selected ? 'text-violet-300' : naturalNext ? 'text-blue-300' : 'text-zinc-600')}>
+                        #{blockIndex + 1}{naturalNext ? ' • natural' : ''}{selected ? ' • escolhido' : ''}
+                      </span>
+                      <span className="block mt-1 font-black text-white">{label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* MODAL EMERGÊNCIA */}
       {menuAberto && (

@@ -7,8 +7,9 @@ import {
   chordCellNames,
   clampStage,
   parseStageBlocks,
-  transposeStageChord,
+  formatStageChord,
   type StageBlockInput,
+  type StageHarmonyNotation,
   type StagePresentationMode,
   type StageViewMode,
 } from '@/lib/songStage';
@@ -27,6 +28,8 @@ export type SongStageRendererProps = {
   className?: string;
   showNextHint?: boolean;
   stageTone?: 'dark' | 'preview';
+  harmonyNotation?: StageHarmonyNotation;
+  keySignature?: string;
 };
 
 type ChordLyricLineProps = {
@@ -37,6 +40,8 @@ type ChordLyricLineProps = {
   semitones: number;
   fontScale: number;
   compact?: boolean;
+  harmonyNotation?: StageHarmonyNotation;
+  keySignature?: string;
 };
 
 const cn = (...parts: Array<string | false | null | undefined>) => parts.filter(Boolean).join(' ');
@@ -53,6 +58,8 @@ export function ChordLyricLine({
   semitones,
   fontScale,
   compact = false,
+  harmonyNotation = 'chords',
+  keySignature = '',
 }: ChordLyricLineProps) {
   const anchors = useMemo(() => {
     const names = chordCellNames(chordCell);
@@ -62,10 +69,10 @@ export function ChordLyricLine({
       // parent, but keeping this component standalone makes it reusable in editor.
       // Reparse through a one-line pseudo block to preserve the same decoder.
       parseStageBlocks([{ letra: lyric, acordes: chordCell, duracao_compassos: 1 }])[0]?.lines[0]?.anchors || [],
-      (chord) => transposeStageChord(chord, semitones),
+      (chord) => formatStageChord(chord, semitones, harmonyNotation, keySignature),
     );
     return { names, guide };
-  }, [chordCell, lyric, semitones]);
+  }, [chordCell, harmonyNotation, keySignature, lyric, semitones]);
 
   const showChords = viewMode === 'both' || viewMode === 'chords';
   const showLyrics = viewMode === 'both' || viewMode === 'lyrics';
@@ -85,7 +92,7 @@ export function ChordLyricLine({
   }
 
   const fallbackChordText = anchors.names
-    .map((chord) => transposeStageChord(chord, semitones))
+    .map((chord) => formatStageChord(chord, semitones, harmonyNotation, keySignature))
     .join('   ');
 
   return (
@@ -133,6 +140,8 @@ export default function SongStageRenderer({
   className,
   showNextHint = true,
   stageTone = 'dark',
+  harmonyNotation = 'chords',
+  keySignature = '',
 }: SongStageRendererProps) {
   const parsedBlocks = useMemo(() => parseStageBlocks(blocks || []), [blocks]);
   const safeBlockIndex = parsedBlocks.length
@@ -297,6 +306,8 @@ export default function SongStageRenderer({
                           viewMode={viewMode}
                           semitones={semitones}
                           fontScale={fontScale}
+                          harmonyNotation={harmonyNotation}
+                          keySignature={keySignature}
                         />
                       </div>
                     );
@@ -330,7 +341,7 @@ export default function SongStageRenderer({
         {viewMode === 'chords' ? (
           <div className="w-full max-w-5xl mx-auto flex flex-wrap justify-center gap-x-6 sm:gap-x-8 gap-y-4 items-center">
             {currentBlock?.lines.slice(0, currentBlock.duration).map((line, lineIndex) => {
-              const names = chordCellNames(line.chordCell).map((chord) => transposeStageChord(chord, semitones));
+              const names = chordCellNames(line.chordCell).map((chord) => formatStageChord(chord, semitones, harmonyNotation, keySignature));
               const active = lineIndex === safeMeasureIndex;
               return (
                 <span
@@ -366,6 +377,8 @@ export default function SongStageRenderer({
                     viewMode={viewMode}
                     semitones={semitones}
                     fontScale={fontScale}
+                  harmonyNotation={harmonyNotation}
+                  keySignature={keySignature}
                   />
                 </div>
               );
@@ -389,6 +402,8 @@ export default function SongStageRenderer({
                   viewMode={viewMode}
                   semitones={semitones}
                   fontScale={Math.max(0.75, fontScale * 0.78)}
+                  harmonyNotation={harmonyNotation}
+                  keySignature={keySignature}
                   compact
                 />
               </div>

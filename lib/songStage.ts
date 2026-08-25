@@ -1,5 +1,6 @@
 export type StageViewMode = 'both' | 'chords' | 'lyrics';
 export type StagePresentationMode = 'slides' | 'scroll';
+export type StageHarmonyNotation = 'chords' | 'degrees';
 
 export type ChordAnchor = {
   chord: string;
@@ -181,4 +182,74 @@ export function transposeStageChord(chord: string, diff: number) {
     const next = ((index + diff) % 12 + 12) % 12;
     return notes[next];
   });
+}
+
+
+const NOTE_INDEX: Record<string, number> = {
+  C: 0,
+  'C#': 1,
+  Db: 1,
+  D: 2,
+  'D#': 3,
+  Eb: 3,
+  E: 4,
+  F: 5,
+  'F#': 6,
+  Gb: 6,
+  G: 7,
+  'G#': 8,
+  Ab: 8,
+  A: 9,
+  'A#': 10,
+  Bb: 10,
+  B: 11,
+};
+
+const DEGREE_BY_SEMITONE = ['1', 'b2', '2', 'b3', '3', '4', '#4', '5', 'b6', '6', 'b7', '7'] as const;
+
+function rootFromChord(value: string) {
+  const match = String(value || '').trim().match(/^([A-G](?:#|b)?)(.*)$/);
+  if (!match) return null;
+  return { root: match[1], rest: match[2] || '' };
+}
+
+function degreeForRoot(root: string, tonic: string) {
+  const rootIndex = NOTE_INDEX[root];
+  const tonicIndex = NOTE_INDEX[tonic];
+  if (rootIndex === undefined || tonicIndex === undefined) return null;
+  const distance = ((rootIndex - tonicIndex) % 12 + 12) % 12;
+  return DEGREE_BY_SEMITONE[distance] || null;
+}
+
+/**
+ * Converts a chord symbol to a scale-degree number while preserving chord quality.
+ * Examples in C: C -> 1, Dm7 -> 2m7, Bb -> b7, C/E -> 1/3.
+ * The source chord is never changed; this is display-only.
+ */
+export function stageChordToDegree(chord: string, keySignature: string) {
+  const key = rootFromChord(keySignature);
+  const parsed = rootFromChord(chord);
+  if (!key || !parsed) return chord;
+
+  const mainDegree = degreeForRoot(parsed.root, key.root);
+  if (!mainDegree) return chord;
+
+  const slashMatch = parsed.rest.match(/^(.*)\/([A-G](?:#|b)?)$/);
+  if (!slashMatch) return `${mainDegree}${parsed.rest}`;
+
+  const suffix = slashMatch[1] || '';
+  const bassDegree = degreeForRoot(slashMatch[2], key.root);
+  return bassDegree ? `${mainDegree}${suffix}/${bassDegree}` : `${mainDegree}${parsed.rest}`;
+}
+
+export function formatStageChord(
+  chord: string,
+  semitones: number,
+  notation: StageHarmonyNotation = 'chords',
+  keySignature = '',
+) {
+  const transposedChord = transposeStageChord(chord, semitones);
+  if (notation !== 'degrees') return transposedChord;
+  const transposedKey = transposeStageChord(keySignature, semitones);
+  return stageChordToDegree(transposedChord, transposedKey);
 }

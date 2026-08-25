@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import SongStageRenderer from '@/components/SongStageRenderer';
-import { clampStage, type StageBlockInput, type StagePresentationMode, type StageViewMode } from '@/lib/songStage';
+import { clampStage, type StageBlockInput, type StageHarmonyNotation, type StagePresentationMode, type StageViewMode } from '@/lib/songStage';
 
 const BEATS_PER_MEASURE = 4;
 const UI_INTERVAL = 50;
@@ -43,6 +43,7 @@ export default function ModoEnsaio() {
   const [timingOffsetMs, setTimingOffsetMs] = useState(0);
   const [viewMode, setViewMode] = useState<StageViewMode>('both');
   const [presentationMode, setPresentationMode] = useState<StagePresentationMode>('scroll');
+  const [harmonyNotation, setHarmonyNotation] = useState<StageHarmonyNotation>('chords');
 
   const rafRef = useRef<number | null>(null);
   const startedAtRef = useRef<number | null>(null);
@@ -245,6 +246,10 @@ export default function ModoEnsaio() {
             <button onClick={() => setViewMode('lyrics')} className={`px-3 min-h-9 rounded-lg text-[9px] font-black uppercase flex items-center gap-1 ${viewMode === 'lyrics' ? 'bg-sky-500/15 text-sky-300' : 'text-zinc-500'}`}><Type size={12}/> Letra</button>
           </div>
           <div className="flex bg-white/5 border border-white/10 p-1 rounded-xl">
+            <button onClick={() => setHarmonyNotation('chords')} className={`px-3 min-h-9 rounded-lg text-[9px] font-black uppercase ${harmonyNotation === 'chords' ? 'bg-yellow-500/15 text-yellow-300' : 'text-zinc-500'}`}>Acordes</button>
+            <button onClick={() => setHarmonyNotation('degrees')} disabled={!String(musica?.tom || '').trim()} className={`px-3 min-h-9 rounded-lg text-[9px] font-black uppercase disabled:opacity-30 ${harmonyNotation === 'degrees' ? 'bg-violet-500/15 text-violet-300' : 'text-zinc-500'}`}>Graus</button>
+          </div>
+          <div className="flex bg-white/5 border border-white/10 p-1 rounded-xl">
             <button onClick={() => setPresentationMode('slides')} className={`px-3 min-h-9 rounded-lg text-[9px] font-black uppercase ${presentationMode === 'slides' ? 'bg-white/10 text-white' : 'text-zinc-500'}`}>Slides</button>
             <button onClick={() => setPresentationMode('scroll')} className={`px-3 min-h-9 rounded-lg text-[9px] font-black uppercase ${presentationMode === 'scroll' ? 'bg-emerald-500/15 text-emerald-300' : 'text-zinc-500'}`}>Rolagem</button>
           </div>
@@ -260,6 +265,8 @@ export default function ModoEnsaio() {
           viewMode={viewMode}
           presentationMode={presentationMode}
           semitones={semitones}
+          harmonyNotation={harmonyNotation}
+          keySignature={String(musica?.tom || '')}
           fontScale={0.95}
           focusRatio={0.34}
           autoScroll={playing}
