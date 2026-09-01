@@ -33,6 +33,7 @@ import type { StageHarmonyNotation } from '@/lib/songStage';
 type ViewMode = 'both' | 'chords' | 'lyrics';
 type PresentationMode = 'slides' | 'scroll';
 type QuickTab = 'songs' | 'history';
+type LivePlaybackMode = 'auto' | 'manual';
 
 type ShowHistoryEntry = {
   id: string;
@@ -147,9 +148,11 @@ type SyncMessage =
       blocoAtivo: number;
       semitons: number;
       musicaId?: string;
+      playbackMode?: LivePlaybackMode;
       viewMode?: ViewMode; // compatibilidade com clientes antigos; preferência visual agora é local
     }
   | { kind: 'PAUSE'; senderId: string }
+  | { kind: 'MODE'; senderId: string; playbackMode: LivePlaybackMode }
   | {
       kind: 'GOTO';
       senderId: string;
@@ -175,6 +178,7 @@ type SyncMessage =
       semitons: number;
       queuedMusicaId?: string | null;
       nextBlockOverride?: number | null;
+      playbackMode?: LivePlaybackMode;
     }
   | { kind: 'PING'; senderId: string; pingId: string; t0: number } // t0 no relógio do follower
   | { kind: 'PONG'; senderId: string; pingId: string; t0: number; t1: number; t2?: number }; // NTP: receive/send no relógio da referência
@@ -302,11 +306,23 @@ export default function ModoLiveNonStop() {
   const [indexMusicaAtual, setIndexMusicaAtual] = useState(0);
   const [blocoAtivo, setBlocoAtivo] = useState(0);
   const [autoScroll, setAutoScroll] = useState(false);
+  const [playbackMode, setPlaybackMode] = useState<LivePlaybackMode>('auto');
+  const playbackModeRef = useRef<LivePlaybackMode>('auto');
+
+  useEffect(() => {
+    playbackModeRef.current = playbackMode;
+  }, [playbackMode]);
   const [progresso, setProgresso] = useState(0);
 
   // countdown
   const [countdown, setCountdown] = useState<number | null>(null);
   const countdownTimerRef = useRef<number | null>(null);
+
+  // Clique do Live é local por aparelho. Para evitar eco no palco, a recomendação
+  // é deixá-lo audível apenas no aparelho/fone do baterista.
+  const [metronomeEnabled, setMetronomeEnabled] = useState(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const lastMetronomeBeatRef = useRef('');
 
   // config palco
   const [semitons, setSemitons] = useState(0);
@@ -364,6 +380,7 @@ export default function ModoLiveNonStop() {
     semitons: 0,
     queuedMusicaId: null as string | null,
     nextBlockOverride: null as number | null,
+    playbackMode: 'auto' as LivePlaybackMode,
   });
 
   // Rolagem da cifra/letra
@@ -528,8 +545,9 @@ export default function ModoLiveNonStop() {
       semitons,
       queuedMusicaId,
       nextBlockOverride,
+      playbackMode,
     };
-  }, [autoScroll, blocoAtivo, effectiveBpm, indexMusicaAtual, musicaAtual?.id, nextBlockOverride, queuedMusicaId, semitons]);
+  }, [autoScroll, blocoAtivo, effectiveBpm, indexMusicaAtual, musicaAtual?.id, nextBlockOverride, playbackMode, queuedMusicaId, semitons]);
 
   const queuedMusica = useMemo(() => {
     if (!queuedMusicaId) return null;
@@ -603,6 +621,62 @@ export default function ModoLiveNonStop() {
       wl?.addEventListener?.('release', () => {});
     } catch {}
   }, []);
+
+  const ensureAudioContext = useCallback(async () => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const AudioCtx = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return null;
+      if (!audioContextRef.current) audioContextRef.current = new AudioCtx();
+      if (audioContextRef.current.state === 'suspended') await audioContextRef.current.resume();
+      return audioContextRef.current;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const scheduleMetronomeClick = useCallback(async (targetEpochMs: number, accent: boolean) => {
+    const ctx = await ensureAudioContext();
+    if (!ctx) return;
+    const delaySeconds = Math.max(0, (targetEpochMs - Date.now()) / 1000);
+    const when = ctx.currentTime + delaySeconds;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(accent ? 1250 : 900, when);
+    gain.gain.setValueAtTime(0.0001, when);
+    gain.gain.exponentialRampToValueAtTime(accent ? 0.22 : 0.13, when + 0.003);
+    gain.gain.exponentialRampToValueAtTime(0.0001, when + 0.055);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(when);
+    osc.stop(when + 0.065);
+  }, [ensureAudioContext]);
+
+  useEffect(() => {
+    if (!metronomeEnabled || (!autoScroll && countdown === null)) return;
+
+    const timer = window.setInterval(() => {
+      const startAt = blockStartEpochRef.current;
+      if (startAt === null) return;
+      const bpm = Math.max(30, Math.min(300, Number(effectiveBpm || 120)));
+      const beatMs = 60000 / bpm;
+      const now = Date.now();
+      const nextBeatIndex = Math.floor((now - startAt) / beatMs) + 1;
+      if (nextBeatIndex < -4) return;
+      const beatAt = startAt + nextBeatIndex * beatMs;
+      const until = beatAt - now;
+      if (until < -20 || until > 110) return;
+
+      const key = `${Math.round(startAt)}:${nextBeatIndex}`;
+      if (lastMetronomeBeatRef.current === key) return;
+      lastMetronomeBeatRef.current = key;
+      const accent = nextBeatIndex % 4 === 0;
+      void scheduleMetronomeClick(beatAt, accent);
+    }, 25);
+
+    return () => window.clearInterval(timer);
+  }, [autoScroll, countdown, effectiveBpm, metronomeEnabled, scheduleMetronomeClick]);
 
   const stopShow = useCallback(async () => {
     setAutoScroll(false);
@@ -903,6 +977,7 @@ export default function ModoLiveNonStop() {
         semitons: snapshot.semitons,
         queuedMusicaId: snapshot.queuedMusicaId,
         nextBlockOverride: snapshot.nextBlockOverride,
+        playbackMode: snapshot.playbackMode,
       });
     }, 1200);
 
@@ -1005,6 +1080,7 @@ export default function ModoLiveNonStop() {
                 semitons: snapshot.semitons,
                 queuedMusicaId: snapshot.queuedMusicaId,
                 nextBlockOverride: snapshot.nextBlockOverride,
+                playbackMode: snapshot.playbackMode,
               } satisfies SyncMessage,
             });
           }
@@ -1019,6 +1095,9 @@ export default function ModoLiveNonStop() {
           referenceBlockStartEpochMsRef.current =
             typeof msg.blockStartEpochMs === 'number' ? msg.blockStartEpochMs : null;
           setSemitons(msg.semitons ?? 0);
+          const restoredPlaybackMode: LivePlaybackMode = msg.playbackMode === 'manual' ? 'manual' : 'auto';
+          playbackModeRef.current = restoredPlaybackMode;
+          setPlaybackMode(restoredPlaybackMode);
 
           if (msg.queuedMusicaId) {
             try {
@@ -1091,6 +1170,19 @@ export default function ModoLiveNonStop() {
           return;
         }
 
+        // ====== MODO DE EXECUÇÃO ======
+        if (msg.kind === 'MODE') {
+          await pauseShow();
+          playbackModeRef.current = msg.playbackMode;
+          setPlaybackMode(msg.playbackMode);
+          setProgresso(0);
+          subChordIndexRef.current = 0;
+          setSubChordIndex(0);
+          blockStartEpochRef.current = null;
+          showStageNotice(msg.playbackMode === 'manual' ? 'Modo manual sincronizado' : 'Rolagem automática por BPM');
+          return;
+        }
+
         // ====== PAUSE ======
         if (msg.kind === 'PAUSE') {
           await pauseShow();
@@ -1130,6 +1222,8 @@ export default function ModoLiveNonStop() {
 
         // ====== START ======
         if (msg.kind === 'START') {
+          playbackModeRef.current = 'auto';
+          setPlaybackMode('auto');
           // Quem mandou START vira referência atual
           isReferenceRef.current = false;
           setIsRhythmReference(false);
@@ -1254,6 +1348,10 @@ export default function ModoLiveNonStop() {
   // ================== START COM COUNTDOWN (quem apertou play) ==================
   const startShowWithCountdown = useCallback(async () => {
     if (lockUI) return;
+    if (playbackModeRef.current === 'manual') {
+      showStageNotice('Modo manual: use Bloco ← / Bloco →');
+      return;
+    }
     if (autoScroll || countdown !== null) return;
 
     // ✅ auto fullscreen (precisa ser dentro do gesto do usuário)
@@ -1272,7 +1370,7 @@ export default function ModoLiveNonStop() {
     const beatMs = 60000 / Math.max(30, Math.min(300, Number(effectiveBpm || 120)));
 
     // ✅ lead maior para comer jitter + dar tempo do ping ajustar
-    const leadBeats = 8;
+    const leadBeats = 4;
 
     let c = 4;
     setCountdown(c);
@@ -1285,6 +1383,7 @@ export default function ModoLiveNonStop() {
     // tempo no MEU relógio (referência)
     const maestroStartAtMs = Date.now() + beatMs * leadBeats;
     referenceBlockStartEpochMsRef.current = maestroStartAtMs;
+    blockStartEpochRef.current = maestroStartAtMs;
 
     await sendSync({
       kind: 'START',
@@ -1296,6 +1395,7 @@ export default function ModoLiveNonStop() {
       blocoAtivo,
       semitons,
       musicaId: musicaAtual?.id ? String(musicaAtual.id) : undefined,
+      playbackMode: 'auto',
     });
 
     countdownTimerRef.current = window.setInterval(async () => {
@@ -1329,10 +1429,15 @@ export default function ModoLiveNonStop() {
     musicaAtual?.id,
     requestWakeLock,
     autoFullscreenOnPlay,
+    showStageNotice,
   ]);
 
   const togglePlay = useCallback(async () => {
     if (lockUI) return;
+    if (playbackModeRef.current === 'manual') {
+      showStageNotice('Manual Sync ativo: use os controles de bloco');
+      return;
+    }
 
     if (autoScroll || countdown !== null) {
       await pauseShow();
@@ -1340,13 +1445,27 @@ export default function ModoLiveNonStop() {
     } else {
       await startShowWithCountdown();
     }
-  }, [lockUI, autoScroll, countdown, pauseShow, sendSync, startShowWithCountdown]);
+  }, [lockUI, autoScroll, countdown, pauseShow, sendSync, showStageNotice, startShowWithCountdown]);
 
   const clearNextBlockOverrideLocal = useCallback(() => {
     nextBlockOverrideRef.current = null;
     setNextBlockOverride(null);
     setShowNextBlockMenu(false);
   }, []);
+
+  const switchPlaybackMode = useCallback(async (nextMode: LivePlaybackMode) => {
+    if (lockUI || playbackModeRef.current === nextMode) return;
+    await pauseShow();
+    playbackModeRef.current = nextMode;
+    setPlaybackMode(nextMode);
+    setProgresso(0);
+    subChordIndexRef.current = 0;
+    setSubChordIndex(0);
+    blockStartEpochRef.current = null;
+    clearNextBlockOverrideLocal();
+    await sendSync({ kind: 'MODE', senderId: clientIdRef.current, playbackMode: nextMode });
+    showStageNotice(nextMode === 'manual' ? 'Manual Sync: blocos seguem os controles do palco' : 'Auto BPM: rolagem automática restaurada');
+  }, [clearNextBlockOverrideLocal, lockUI, pauseShow, sendSync, showStageNotice]);
 
   const saltarParaIndex = useCallback(
     async (nextIndex: number) => {
@@ -1590,7 +1709,7 @@ export default function ModoLiveNonStop() {
     const acordesCount = Math.max(1, Number(item.bloco?.duracao_compassos) || 1);
 
     const step = () => {
-      if (!autoScroll) return;
+      if (!autoScroll || playbackModeRef.current === 'manual') return;
 
       const now = Date.now();
 
@@ -2356,13 +2475,13 @@ export default function ModoLiveNonStop() {
           {/* PLAY */}
           <button
             onClick={togglePlay}
-            disabled={lockUI}
+            disabled={lockUI || playbackMode === 'manual'}
             className={cn(
               'p-3 rounded-full transition-all',
               autoScroll || countdown !== null ? 'bg-red-600' : 'bg-blue-600',
               lockUI ? 'opacity-40' : 'active:scale-95'
             )}
-            title={autoScroll ? 'Pausar' : 'Iniciar (com contagem e sync)'}
+            title={playbackMode === 'manual' ? 'Modo manual: use os controles de bloco' : autoScroll ? 'Pausar' : 'Iniciar (contagem sincronizada + click opcional)'}
           >
             {autoScroll || countdown !== null ? <Pause size={20} fill="white" /> : <Play size={20} fill="white" />}
           </button>
@@ -2440,6 +2559,49 @@ export default function ModoLiveNonStop() {
               Graus
             </button>
           </div>
+
+          <div className="flex items-center gap-1 bg-white/5 border border-white/10 rounded-xl p-1">
+            <button
+              disabled={lockUI}
+              onClick={() => void switchPlaybackMode('auto')}
+              className={cn(
+                'min-h-9 px-3 rounded-lg text-[9px] sm:text-[10px] font-black uppercase tracking-widest transition-all',
+                playbackMode === 'auto' ? 'bg-blue-500/15 text-blue-300' : 'text-zinc-500 hover:text-zinc-300',
+                lockUI ? 'opacity-40' : ''
+              )}
+              title="Blocos avançam automaticamente pelo BPM"
+            >
+              Auto BPM
+            </button>
+            <button
+              disabled={lockUI}
+              onClick={() => void switchPlaybackMode('manual')}
+              className={cn(
+                'min-h-9 px-3 rounded-lg text-[9px] sm:text-[10px] font-black uppercase tracking-widest transition-all',
+                playbackMode === 'manual' ? 'bg-amber-500/15 text-amber-300' : 'text-zinc-500 hover:text-zinc-300',
+                lockUI ? 'opacity-40' : ''
+              )}
+              title="Um aparelho muda o bloco e todos os aparelhos espelham"
+            >
+              Manual Sync
+            </button>
+          </div>
+
+          <button
+            disabled={lockUI}
+            onClick={() => {
+              void ensureAudioContext();
+              setMetronomeEnabled((value) => !value);
+            }}
+            className={cn(
+              'min-h-11 px-3 rounded-xl border text-[9px] sm:text-[10px] font-black uppercase tracking-widest transition-all',
+              metronomeEnabled ? 'border-emerald-500/30 bg-emerald-500/15 text-emerald-300' : 'border-white/10 bg-white/5 text-zinc-500 hover:text-zinc-300',
+              lockUI ? 'opacity-40' : ''
+            )}
+            title="Click local sincronizado. Prefira áudio apenas no aparelho/fone do baterista."
+          >
+            Click {metronomeEnabled ? 'ON' : 'OFF'}
+          </button>
 
           <div className="flex items-center gap-1 bg-white/5 border border-white/10 rounded-xl p-1">
             <button
@@ -2538,6 +2700,14 @@ export default function ModoLiveNonStop() {
       </main>
 
       {/* FOOTER */}
+      {playbackMode === 'manual' && (
+        <div className={cn('px-3 sm:px-5 pb-2', chromeClass)}>
+          <div className="mx-auto max-w-3xl rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-center text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-amber-200">
+            Manual Sync ativo • Bloco ← / Bloco → em qualquer aparelho muda o bloco para todos
+          </div>
+        </div>
+      )}
+
       <footer className={cn('px-2 sm:px-4 py-3 sm:py-4 bg-black border-t border-white/5 flex items-center justify-between gap-2', chromeClass)}>
         {/* Transposição */}
         <div className="flex items-center gap-2">
@@ -2559,9 +2729,9 @@ export default function ModoLiveNonStop() {
             <ChevronLeft />
           </button>
 
-          <div className={cn('bg-blue-600 px-4 sm:px-6 py-2 rounded-2xl text-center shadow-lg', isMobile ? 'min-w-[150px]' : 'min-w-[190px]')}>
+          <div className={cn(playbackMode === 'manual' ? 'bg-amber-600' : 'bg-blue-600', 'px-4 sm:px-6 py-2 rounded-2xl text-center shadow-lg', isMobile ? 'min-w-[150px]' : 'min-w-[190px]')}>
             <p className="text-[8px] font-black text-blue-200 uppercase leading-none mb-1">
-              {indexMusicaAtual + 1} / {musicas.length} • Bloco {Math.min(blocoAtivo + 1, Math.max(1, estruturaAtual.length))}
+              {playbackMode === 'manual' ? 'MANUAL SYNC • ' : ''}{indexMusicaAtual + 1} / {musicas.length} • Bloco {Math.min(blocoAtivo + 1, Math.max(1, estruturaAtual.length))}
             </p>
             <p className="font-black italic uppercase text-[10px] truncate leading-none">{musicaAtual?.titulo || '—'}</p>
             <p className={cn('mt-1 text-[8px] font-black uppercase tracking-wider truncate', queuedMusica ? 'text-amber-200' : 'text-blue-200/70')}>
@@ -2581,7 +2751,7 @@ export default function ModoLiveNonStop() {
         {/* Direita */}
         <div className="flex items-center gap-2 sm:gap-3">
           <button
-            disabled={lockUI || estruturaAtual.length === 0}
+            disabled={lockUI || playbackMode === 'manual' || estruturaAtual.length === 0}
             onClick={() => setShowNextBlockMenu(true)}
             className={cn(
               'min-h-11 px-3 rounded-2xl border text-[9px] font-black uppercase tracking-wider disabled:opacity-20',

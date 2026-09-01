@@ -1,11 +1,12 @@
 'use client';
 
 import React, { useMemo, useState } from 'react';
-import { Calendar, MapPin, Palette, ArrowLeft, Loader2, Save, Repeat, Users, Sparkles, Settings2 } from 'lucide-react';
+import { Calendar, MapPin, ArrowLeft, Loader2, Save, Repeat, Users, Sparkles, Settings2 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useOrg } from '@/contexts/OrgContext';
 import Link from 'next/link';
 import { getAuthAccessToken } from '@/lib/deviceIdentity';
+import EventPalettePicker from '@/components/EventPalettePicker';
 
 const DIAS = [
   { label: 'Dom', value: 0 },
@@ -27,6 +28,7 @@ export default function CriarEvento() {
   const [horaRecorrente, setHoraRecorrente] = useState('19:00');
   const [autoEscalar, setAutoEscalar] = useState(true);
   const [modoPreparacao, setModoPreparacao] = useState<'simples' | 'completo'>('simples');
+  const [paletaEvento, setPaletaEvento] = useState('');
 
   const diasLabel = useMemo(() => {
     const map = new Map(DIAS.map(d => [d.value, d.label]));
@@ -47,7 +49,7 @@ export default function CriarEvento() {
     const formData = new FormData(e.currentTarget);
     const local = String(formData.get('local') || '').trim();
     const dataHoraManual = String(formData.get('data') || '').trim();
-    const paleta = String(formData.get('paleta') || '').trim() || null;
+    const paleta = String(formData.get('paleta') || paletaEvento || '').trim() || null;
     const userTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
     if (!local) return alert('Informe o local.');
@@ -221,11 +223,9 @@ export default function CriarEvento() {
           </div>
 
           <div>
-            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1 mb-2 block">Dress Code</label>
-            <div className="relative">
-              <Palette className="absolute left-4 top-1/2 -translate-y-1/2 size-5 text-slate-600" />
-              <input name="paleta" placeholder="Ex: Todo preto" className="w-full p-4 pl-12 rounded-xl bg-slate-950 text-white border border-white/5 outline-none focus:border-blue-500/50 font-bold placeholder:text-slate-700" />
-            </div>
+            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1 mb-2 block">Paleta de cores / Dress Code</label>
+            <EventPalettePicker value={paletaEvento} onChange={setPaletaEvento} name="paleta" />
+            <p className="mt-2 ml-1 text-[9px] font-bold text-slate-600">Escolha uma combinação rápida ou escreva uma orientação personalizada para a equipe.</p>
           </div>
 
           <button type="submit" disabled={loading} className="w-full bg-blue-500/5 border border-blue-500/20 text-blue-500 py-5 rounded-2xl font-black uppercase text-[14px] tracking-[0.2em] active:scale-95 flex items-center justify-center gap-3 hover:text-white transition-all disabled:opacity-60">

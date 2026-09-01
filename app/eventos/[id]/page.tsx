@@ -35,6 +35,7 @@ import { supabase } from '@/lib/supabase';
 import { sendPush } from '@/lib/push/sendPush';
 import { useOrg } from '@/contexts/OrgContext';
 import SubscriptionGuard from '@/components/SubscriptionGuard';
+import EventPalettePicker, { paletteColorsFor } from '@/components/EventPalettePicker';
 
 type StageBlock = {
   duracao_compassos?: number | null;
@@ -330,6 +331,9 @@ export default function EventoPreparationHub() {
   const [newChecklistCategory, setNewChecklistCategory] = useState<ChecklistCategory>('equipamento');
   const [newChecklistResponsible, setNewChecklistResponsible] = useState('');
   const [modeSaving, setModeSaving] = useState(false);
+  const [paletteEditing, setPaletteEditing] = useState(false);
+  const [paletteSaving, setPaletteSaving] = useState(false);
+  const [paletteDraft, setPaletteDraft] = useState('');
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 60000);
@@ -413,6 +417,7 @@ export default function EventoPreparationHub() {
         }
 
         setEventInfo(eventRes.data as EventInfo);
+        setPaletteDraft(String((eventRes.data as EventInfo)?.paleta_cores || ''));
         setScales((scaleRes.data as unknown as ScaleMember[]) || []);
         setSetlist((setlistRes.data as unknown as SetlistItem[]) || []);
 
@@ -750,6 +755,28 @@ export default function EventoPreparationHub() {
     }
   }
 
+  async function saveEventPalette() {
+    if (!eventInfo || !org?.id || paletteSaving) return;
+    setPaletteSaving(true);
+    try {
+      const nextPalette = paletteDraft.trim() || null;
+      const { error } = await supabase
+        .from('eventos')
+        .update({ paleta_cores: nextPalette })
+        .eq('org_id', org.id)
+        .eq('id', eventId);
+      if (error) throw error;
+
+      setEventInfo((current) => (current ? { ...current, paleta_cores: nextPalette } : current));
+      setPaletteEditing(false);
+    } catch (error: any) {
+      console.error('Erro ao atualizar paleta do evento:', error);
+      window.alert(error?.message || 'Não foi possível atualizar a paleta de cores.');
+    } finally {
+      setPaletteSaving(false);
+    }
+  }
+
   async function setEventPreparationMode(nextMode: EventPreparationMode) {
     if (!eventInfo || !org?.id || modeSaving) return;
     if (eventInfo.modo_preparacao === nextMode) return;
@@ -842,7 +869,9 @@ export default function EventoPreparationHub() {
             </button>
           </div>
         </div>
-      </SubscriptionGuard>
+
+
+    </SubscriptionGuard>
     );
   }
 
@@ -932,11 +961,25 @@ export default function EventoPreparationHub() {
                   )}>
                     {isCompleteEvent ? 'Produção completa' : 'Evento simples'}
                   </span>
-                  {eventInfo.paleta_cores && (
-                    <span className="px-3 py-1.5 rounded-full border border-white/10 bg-white/5 text-[9px] font-black uppercase tracking-widest text-slate-300 inline-flex items-center gap-1.5">
-                      <Palette size={12} /> {eventInfo.paleta_cores}
-                    </span>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPaletteDraft(String(eventInfo.paleta_cores || ''));
+                      setPaletteEditing(true);
+                    }}
+                    className="px-3 py-1.5 rounded-full border border-white/10 bg-white/5 text-[9px] font-black uppercase tracking-widest text-slate-300 inline-flex items-center gap-1.5 hover:border-blue-500/30 hover:text-white transition-colors"
+                    title="Editar paleta de cores do evento"
+                  >
+                    <Palette size={12} />
+                    {paletteColorsFor(eventInfo.paleta_cores).length > 0 && (
+                      <span className="inline-flex items-center gap-1">
+                        {paletteColorsFor(eventInfo.paleta_cores).map((color) => (
+                          <span key={color} className="size-2.5 rounded-full border border-white/20" style={{ backgroundColor: color }} />
+                        ))}
+                      </span>
+                    )}
+                    {eventInfo.paleta_cores || 'Definir paleta'}
+                  </button>
                 </div>
 
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -1556,6 +1599,30 @@ export default function EventoPreparationHub() {
           </div>
         </div>
       </div>
+        {paletteEditing && (
+        <div className="fixed inset-0 z-[220] bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-3 sm:p-6" onClick={() => setPaletteEditing(false)}>
+          <div className="w-full max-w-2xl rounded-[2rem] border border-white/10 bg-slate-950 p-5 sm:p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+            <div className="flex items-center justify-between gap-3 mb-5">
+              <div>
+                <p className="text-[9px] font-black uppercase tracking-[0.2em] text-blue-400">Evento</p>
+                <h3 className="mt-1 text-xl font-black uppercase text-white">Paleta de cores</h3>
+                <p className="mt-1 text-xs font-bold text-slate-500">A orientação fica visível para a equipe e pode ser alterada a qualquer momento.</p>
+              </div>
+              <button type="button" onClick={() => setPaletteEditing(false)} className="p-2 rounded-xl bg-white/5 text-slate-400"><XCircle size={20} /></button>
+            </div>
+
+            <EventPalettePicker value={paletteDraft} onChange={setPaletteDraft} name="" compact />
+
+            <div className="mt-5 flex gap-2 justify-end">
+              <button type="button" onClick={() => setPaletteEditing(false)} className="min-h-11 px-4 rounded-xl border border-white/10 bg-white/5 text-[10px] font-black uppercase tracking-wider text-slate-400">Cancelar</button>
+              <button type="button" disabled={paletteSaving} onClick={() => void saveEventPalette()} className="min-h-11 px-5 rounded-xl border border-blue-500/30 bg-blue-500/15 text-[10px] font-black uppercase tracking-wider text-blue-200 disabled:opacity-50">
+                {paletteSaving ? 'Salvando...' : 'Salvar paleta'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </SubscriptionGuard>
   );
 }

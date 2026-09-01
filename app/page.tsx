@@ -107,31 +107,6 @@ function formatEventDateLong(evData: string) {
   });
 }
 
-function formatCountdown(evData: string, nowMs: number) {
-  const target = new Date(evData).getTime();
-  if (!Number.isFinite(target)) return 'Data pendente';
-
-  const diff = target - nowMs;
-  const eventDate = new Date(target);
-  const now = new Date(nowMs);
-  const sameDay =
-    eventDate.getFullYear() === now.getFullYear() &&
-    eventDate.getMonth() === now.getMonth() &&
-    eventDate.getDate() === now.getDate();
-
-  if (sameDay) return 'Hoje';
-  if (diff <= 0) return 'Data passada';
-
-  const totalMinutes = Math.max(1, Math.floor(diff / 60000));
-  const days = Math.floor(totalMinutes / 1440);
-  const hours = Math.floor((totalMinutes % 1440) / 60);
-  const minutes = totalMinutes % 60;
-
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${minutes}min`;
-  return `${minutes}min`;
-}
-
 function pickOneCandidate(cands: any[]) {
   return [...(cands || [])].sort((a, b) => {
     const na = String(a?.membros?.nome || '').localeCompare(String(b?.membros?.nome || ''), 'pt-BR', {
@@ -219,7 +194,9 @@ export default function HomeMembro() {
   const [perfilAtivo, setPerfilAtivo] = useState<any>(null);
   const [pushStatus, setPushStatus] = useState<'default' | 'granted' | 'denied'>('default');
   const [rangeKey, setRangeKey] = useState<RangeKey>('all');
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [eventoParaCancelar, setEventoParaCancelar] = useState<any | null>(null);
+  const [motivoCancelamento, setMotivoCancelamento] = useState('');
+  const [cancelandoId, setCancelandoId] = useState<string | null>(null);
 
   const cn = (...c: Array<string | false | null | undefined>) => c.filter(Boolean).join(' ');
 
@@ -230,10 +207,6 @@ export default function HomeMembro() {
     return 'Este ano';
   }, [rangeKey]);
 
-  useEffect(() => {
-    const timer = window.setInterval(() => setNowMs(Date.now()), 60000);
-    return () => window.clearInterval(timer);
-  }, []);
 
   const escalasPorEvento = useMemo(() => {
     const grouped = new Map<string, any[]>();
@@ -277,125 +250,65 @@ export default function HomeMembro() {
     return grouped;
   }, [checklistOperacional]);
 
-  const eventoEmFoco = useMemo(() => {
-    if (eventos.length === 0) return null;
+  const resumoDoEvento = useCallback(
+    (evento: any) => {
+      const eventoId = String(evento?.id || '');
+      const participantes = escalasPorEvento.get(eventoId) || [];
+      const minhaEscala = minhaEscalaPorEvento.get(eventoId);
+      const setlist = Array.isArray(evento?.evento_repertorio) ? evento.evento_repertorio : [];
+      const musicas = setlist.map((item: any) => item?.repertorio).filter(Boolean);
+      const operacao = operacaoPorEvento.get(eventoId);
+      const checklist = checklistPorEvento.get(eventoId) || [];
+      const checklistConcluido = checklist.filter((item: any) => item?.concluido).length;
+      const operacaoOk = Boolean(
+        operacao?.chegada_em &&
+          operacao?.passagem_som_em &&
+          (String(operacao?.endereco || '').trim() || String(operacao?.mapa_url || '').trim())
+      );
+      const checklistOk = checklist.length > 0 && checklistConcluido === checklist.length;
 
-    const startOfToday = new Date(nowMs);
-    startOfToday.setHours(0, 0, 0, 0);
-    const startMs = startOfToday.getTime();
+      const checks = [
+        { key: 'setlist', ok: musicas.length > 0 },
+        { key: 'lineup', ok: participantes.length > 0 },
+        {
+          key: 'bpm',
+          ok: musicas.length > 0 && musicas.every((musica: any) => Number(musica?.bpm) > 0),
+        },
+        {
+          key: 'tom',
+          ok:
+            musicas.length > 0 &&
+            musicas.every((musica: any) => String(musica?.tom || '').trim().length > 0),
+        },
+      ];
 
-    return (
-      eventos.find((evento) => {
-        const timestamp = new Date(evento?.data || '').getTime();
-        return Number.isFinite(timestamp) && timestamp >= startMs;
-      }) || eventos[0]
-    );
-  }, [eventos, nowMs]);
+      if (evento?.modo_preparacao === 'completo') {
+        checks.push({ key: 'operacao', ok: operacaoOk });
+        checks.push({ key: 'checklist', ok: checklistOk });
+      }
 
-  const resumoEventoEmFoco = useMemo(() => {
-    if (!eventoEmFoco) return null;
+      if (perfilAtivo) {
+        checks.push({ key: 'presenca', ok: minhaEscala?.status === 'confirmado' });
+      }
 
-    const eventoId = String(eventoEmFoco.id);
-    const participantes = escalasPorEvento.get(eventoId) || [];
-    const minhaEscala = minhaEscalaPorEvento.get(eventoId);
-    const setlist = Array.isArray(eventoEmFoco.evento_repertorio) ? eventoEmFoco.evento_repertorio : [];
-    const musicas = setlist.map((item: any) => item?.repertorio).filter(Boolean);
+      const completed = checks.filter((check) => check.ok).length;
+      const readiness = checks.length > 0 ? Math.round((completed / checks.length) * 100) : 0;
 
-    const operacao = operacaoPorEvento.get(eventoId);
-    const checklist = checklistPorEvento.get(eventoId) || [];
-    const checklistConcluido = checklist.filter((item: any) => item?.concluido).length;
-    const operacaoOk = Boolean(
-      operacao?.chegada_em &&
-        operacao?.passagem_som_em &&
-        (String(operacao?.endereco || '').trim() || String(operacao?.mapa_url || '').trim())
-    );
-    const checklistOk = checklist.length > 0 && checklistConcluido === checklist.length;
-
-    const checks = [
-      { key: 'setlist', label: 'Setlist', ok: musicas.length > 0, detail: `${musicas.length} músicas` },
-      {
-        key: 'lineup',
-        label: 'Lineup',
-        ok: participantes.length > 0,
-        detail: `${participantes.length} confirmados`,
-      },
-      {
-        key: 'bpm',
-        label: 'BPM',
-        ok: musicas.length > 0 && musicas.every((musica: any) => Number(musica?.bpm) > 0),
-        detail:
-          musicas.length === 0
-            ? 'aguardando setlist'
-            : `${musicas.filter((musica: any) => !Number(musica?.bpm)).length} pendentes`,
-      },
-      {
-        key: 'tom',
-        label: 'Tons',
-        ok:
-          musicas.length > 0 &&
-          musicas.every((musica: any) => String(musica?.tom || '').trim().length > 0),
-        detail:
-          musicas.length === 0
-            ? 'aguardando setlist'
-            : `${musicas.filter((musica: any) => !String(musica?.tom || '').trim()).length} pendentes`,
-      },
-    ];
-
-    const isCompleteEvent = eventoEmFoco?.modo_preparacao === 'completo';
-
-    if (isCompleteEvent) {
-      checks.push({
-        key: 'operacao',
-        label: 'Operação',
-        ok: operacaoOk,
-        detail: operacaoOk ? 'logística definida' : 'chegada / passagem / endereço pendentes',
-      });
-
-      checks.push({
-        key: 'checklist',
-        label: 'Checklist',
-        ok: checklistOk,
-        detail: checklist.length === 0 ? 'nenhum item' : `${checklistConcluido}/${checklist.length} concluídos`,
-      });
-    }
-
-    if (perfilAtivo) {
-      checks.push({
-        key: 'presenca',
-        label: 'Minha presença',
-        ok: minhaEscala?.status === 'confirmado',
-        detail:
-          minhaEscala?.status === 'confirmado'
-            ? 'confirmada'
-            : minhaEscala?.status === 'falta'
-            ? 'marcada como falta'
-            : 'não respondida',
-      });
-    }
-
-    const completed = checks.filter((check) => check.ok).length;
-    const readiness = checks.length > 0 ? Math.round((completed / checks.length) * 100) : 0;
-    const status = readiness === 100 ? 'Pronto para o palco' : readiness >= 60 ? 'Quase pronto' : 'Precisa de atenção';
-
-    return {
-      participantes,
-      musicas,
-      checks,
-      completed,
-      readiness,
-      status,
-      countdown: formatCountdown(eventoEmFoco.data, nowMs),
-      isCompleteEvent,
-    };
-  }, [
-    checklistPorEvento,
-    escalasPorEvento,
-    eventoEmFoco,
-    minhaEscalaPorEvento,
-    nowMs,
-    operacaoPorEvento,
-    perfilAtivo,
-  ]);
+      return {
+        readiness,
+        completed,
+        total: checks.length,
+        pending: Math.max(0, checks.length - completed),
+      };
+    },
+    [
+      checklistPorEvento,
+      escalasPorEvento,
+      minhaEscalaPorEvento,
+      operacaoPorEvento,
+      perfilAtivo,
+    ]
+  );
 
   const carregarDashboard = useCallback(async () => {
     if (!org?.id) return;
@@ -424,9 +337,9 @@ export default function HomeMembro() {
 
       let q = supabase
         .from('eventos')
-        .select(`id, local, data, paleta_cores, recorrencia_id, modo_preparacao, evento_repertorio(id, repertorio(id, titulo, categoria, bpm, tom))`)
+        .select(`id, local, data, paleta_cores, recorrencia_id, modo_preparacao, finalizado, cancelado, cancelado_em, motivo_cancelamento, evento_repertorio(id, repertorio(id, titulo, categoria, bpm, tom))`)
         .eq('org_id', org.id)
-        .eq('finalizado', false)
+        .or('finalizado.eq.false,cancelado.eq.true')
         .order('data', { ascending: true });
 
       if (start) q = q.gte('data', start.toISOString());
@@ -438,9 +351,17 @@ export default function HomeMembro() {
         return;
       }
 
-      setEventos(evs || []);
+      const eventosVisiveis = (evs || []).filter((evento: any) => {
+        if (!evento?.cancelado || rangeKey !== 'all') return true;
+        const fimDoDiaDoEvento = new Date(evento.data);
+        if (Number.isNaN(fimDoDiaDoEvento.getTime())) return true;
+        fimDoDiaDoEvento.setHours(23, 59, 59, 999);
+        return fimDoDiaDoEvento.getTime() >= Date.now();
+      });
 
-      if (!evs || evs.length === 0) {
+      setEventos(eventosVisiveis);
+
+      if (eventosVisiveis.length === 0) {
         setMinhasEscalas([]);
         setTodasEscalas([]);
         setOperacoes([]);
@@ -448,7 +369,7 @@ export default function HomeMembro() {
         return;
       }
 
-      const ids = evs.map((e: any) => e.id);
+      const ids = eventosVisiveis.map((e: any) => e.id);
 
       const geralPromise = supabase
         .from('escalas')
@@ -597,6 +518,71 @@ async function alternarPresenca(eventoId: string, statusAtual?: string) {
 }
 
 
+  async function cancelarEvento() {
+    if (!eventoParaCancelar?.id || !org?.id) return;
+
+    const eventoId = String(eventoParaCancelar.id);
+    try {
+      setCancelandoId(eventoId);
+      const { data: authData } = await supabase.auth.getSession();
+      const token = authData.session?.access_token;
+      if (!token) throw new Error('Sessão não encontrada. Entre novamente no Band Manager.');
+
+      const response = await fetch('/api/eventos/cancel', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          eventId: eventoId,
+          reason: motivoCancelamento.trim() || null,
+        }),
+      });
+
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.error || 'Não foi possível cancelar o evento.');
+
+      const motivo = motivoCancelamento.trim();
+      setEventos((prev) =>
+        prev.map((evento) =>
+          String(evento?.id) === eventoId
+            ? {
+                ...evento,
+                cancelado: true,
+                finalizado: true,
+                cancelado_em: payload?.cancelledAt || new Date().toISOString(),
+                motivo_cancelamento: motivo || null,
+              }
+            : evento
+        )
+      );
+
+      const membrosIds = todasEscalas
+        .filter((item: any) => String(item?.evento_id) === eventoId)
+        .map((item: any) => String(item?.membro_id || '').trim())
+        .filter(Boolean);
+
+      if (membrosIds.length > 0) {
+        void sendPush({
+          title: 'Evento cancelado',
+          message: `${eventoParaCancelar.local || 'Evento'} foi cancelado${motivo ? `: ${motivo}` : '.'}`,
+          url: '/',
+          externalUserIds: membrosIds,
+          data: { type: 'event_cancelled', eventoId, reason: motivo || null },
+        }).catch((err) => console.error('Erro ao enviar push de cancelamento:', err));
+      }
+
+      setEventoParaCancelar(null);
+      setMotivoCancelamento('');
+    } catch (err: any) {
+      alert(err?.message || 'Não foi possível cancelar o evento.');
+    } finally {
+      setCancelandoId(null);
+    }
+  }
+
+
   const FilterPill = ({ k, label }: { k: RangeKey; label: string }) => {
     const isActive = rangeKey === k;
     return (
@@ -723,136 +709,44 @@ async function alternarPresenca(eventoId: string, statusAtual?: string) {
             </div>
           </header>
 
-          {eventoEmFoco && resumoEventoEmFoco && (
-            <section className="relative overflow-hidden mb-6 rounded-[2rem] border border-blue-500/20 bg-gradient-to-br from-blue-500/[0.09] via-slate-900/90 to-slate-950 shadow-2xl shadow-blue-950/20">
-              <div className="absolute top-0 left-0 h-1 w-full bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-70" />
-
-              <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.25fr)_minmax(360px,0.75fr)]">
-                <div className="p-5 sm:p-7 lg:p-8 xl:border-r xl:border-white/5">
-                  <div className="flex flex-wrap items-center gap-2 mb-5">
-                    <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-3 py-1.5 text-[9px] font-black uppercase tracking-[0.2em] text-blue-300">
-                      Central do show
-                    </span>
-                    <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-[9px] font-black uppercase tracking-widest text-slate-300">
-                      {resumoEventoEmFoco.countdown}
-                    </span>
+          <section className="mb-5 rounded-[1.6rem] border border-blue-500/20 bg-blue-500/[0.055] p-3 sm:p-4">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+              <Link
+                href="/repertorio"
+                className="group flex min-w-0 flex-1 items-center justify-between gap-4 rounded-2xl px-3 py-2.5 transition-all hover:bg-blue-500/10"
+              >
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white shadow-lg shadow-blue-600/20">
+                    <Music2 size={22} />
                   </div>
-
-                  <p className="text-[10px] sm:text-xs font-black uppercase tracking-[0.22em] text-blue-400 mb-2">
-                    {formatEventDateLong(eventoEmFoco.data)}
-                  </p>
-                  <h2 className="max-w-4xl text-3xl sm:text-4xl lg:text-5xl font-black italic uppercase tracking-tighter leading-[0.95] break-words">
-                    {eventoEmFoco.local || 'Próximo evento'}
-                  </h2>
-
-                  <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs font-bold text-slate-400">
-                    <span className="flex items-center gap-2">
-                      <ListMusic size={15} className="text-blue-400" />
-                      {resumoEventoEmFoco.musicas.length} músicas
+                  <div className="min-w-0">
+                    <span className="block text-[11px] sm:text-xs font-black uppercase tracking-[0.15em] text-white">
+                      Repertório
                     </span>
-                    <span className="flex items-center gap-2">
-                      <Users size={15} className="text-emerald-400" />
-                      {resumoEventoEmFoco.participantes.length} confirmados
+                    <span className="block truncate text-[9px] font-bold uppercase tracking-widest text-blue-400">
+                      Ver, editar e organizar músicas
                     </span>
-                  </div>
-
-                  <div className="mt-7 flex flex-col sm:flex-row gap-3">
-                    <Link
-                      href={`/live/${eventoEmFoco.id}`}
-                      className="inline-flex min-h-12 items-center justify-center gap-2 rounded-2xl bg-blue-600 px-6 py-3 text-[10px] font-black uppercase tracking-[0.18em] text-white shadow-lg shadow-blue-600/20 transition-all hover:bg-blue-500 active:scale-[0.98]"
-                    >
-                      <PlayCircle size={18} /> Abrir Live
-                    </Link>
-                    <Link
-                      href={`/eventos/${eventoEmFoco.id}`}
-                      className="inline-flex min-h-12 items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-6 py-3 text-[10px] font-black uppercase tracking-[0.18em] text-slate-200 transition-all hover:border-blue-500/30 hover:bg-blue-500/10 active:scale-[0.98]"
-                    >
-                      <Gauge size={18} /> Preparar show
-                    </Link>
                   </div>
                 </div>
+                <ChevronRight size={18} className="shrink-0 text-blue-400 transition-transform group-hover:translate-x-1" />
+              </Link>
 
-                <div className="p-5 sm:p-7 lg:p-8 bg-black/10">
-                  <div className="flex items-start justify-between gap-5">
-                    <div>
-                      <p className="text-[9px] font-black uppercase tracking-[0.2em] text-slate-500 mb-1">Preparação</p>
-                      <h3 className={cn(
-                        'text-lg sm:text-xl font-black uppercase tracking-tight',
-                        resumoEventoEmFoco.readiness === 100
-                          ? 'text-emerald-300'
-                          : resumoEventoEmFoco.readiness >= 60
-                          ? 'text-yellow-300'
-                          : 'text-orange-300'
-                      )}>
-                        {resumoEventoEmFoco.status}
-                      </h3>
-                    </div>
-                    <div className="text-right">
-                      <strong className="block text-3xl font-black tabular-nums">{resumoEventoEmFoco.readiness}%</strong>
-                      <span className="text-[8px] font-black uppercase tracking-widest text-slate-600">
-                        {resumoEventoEmFoco.completed}/{resumoEventoEmFoco.checks.length}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/5">
-                    <div
-                      className={cn(
-                        'h-full rounded-full transition-all duration-500',
-                        resumoEventoEmFoco.readiness === 100
-                          ? 'bg-emerald-500'
-                          : resumoEventoEmFoco.readiness >= 60
-                          ? 'bg-yellow-400'
-                          : 'bg-orange-500'
-                      )}
-                      style={{ width: `${resumoEventoEmFoco.readiness}%` }}
-                    />
-                  </div>
-
-                  <div className="mt-5 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2 gap-2">
-                    {resumoEventoEmFoco.checks.map((check) => (
-                      <div
-                        key={check.key}
-                        className={cn(
-                          'rounded-xl border px-3 py-2.5 flex items-center gap-3 min-w-0',
-                          check.ok
-                            ? 'border-emerald-500/15 bg-emerald-500/[0.06]'
-                            : 'border-orange-500/15 bg-orange-500/[0.06]'
-                        )}
-                      >
-                        {check.ok ? (
-                          <CheckCircle2 size={16} className="shrink-0 text-emerald-400" />
-                        ) : (
-                          <AlertCircle size={16} className="shrink-0 text-orange-400" />
-                        )}
-                        <div className="min-w-0">
-                          <span className="block text-[10px] font-black uppercase text-slate-200">{check.label}</span>
-                          <span className="block text-[9px] font-bold text-slate-500 truncate">{check.detail}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+              <div className="grid grid-cols-2 gap-2 sm:flex sm:shrink-0">
+                <Link
+                  href="/eventos/setlists"
+                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-blue-500/25 bg-blue-500/[0.07] px-4 text-[10px] font-black uppercase tracking-[0.14em] text-blue-300 transition-all hover:bg-blue-500/12 hover:text-white active:scale-[0.98]"
+                >
+                  <ListMusic size={16} /> Setlists
+                </Link>
+                <Link
+                  href="/repertorio/novo"
+                  className="inline-flex min-h-11 items-center justify-center rounded-xl bg-blue-600 px-5 text-[10px] font-black uppercase tracking-[0.16em] text-white shadow-lg shadow-blue-600/20 transition-all hover:bg-blue-500 active:scale-[0.98]"
+                >
+                  + Nova música
+                </Link>
               </div>
-
-              <div className="border-t border-white/5 bg-black/15 px-3 sm:px-5 py-3 overflow-x-auto no-scrollbar">
-                <div className="min-w-max flex items-center gap-2">
-                  <Link href="/repertorio" className="inline-flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.035] px-4 py-2.5 text-[9px] font-black uppercase tracking-widest text-slate-300 hover:text-white hover:border-blue-500/20">
-                    <Music size={14} className="text-blue-400" /> Repertório
-                  </Link>
-                  <Link href="/eventos/setlists" className="inline-flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.035] px-4 py-2.5 text-[9px] font-black uppercase tracking-widest text-slate-300 hover:text-white hover:border-blue-500/20">
-                    <ListMusic size={14} className="text-blue-400" /> Setlists
-                  </Link>
-                  <Link href="/membros" className="inline-flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.035] px-4 py-2.5 text-[9px] font-black uppercase tracking-widest text-slate-300 hover:text-white hover:border-blue-500/20">
-                    <Users size={14} className="text-blue-400" /> Membros
-                  </Link>
-                  <Link href="/eventos/novo" className="inline-flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.035] px-4 py-2.5 text-[9px] font-black uppercase tracking-widest text-slate-300 hover:text-white hover:border-blue-500/20">
-                    <Calendar size={14} className="text-blue-400" /> Novo evento
-                  </Link>
-                </div>
-              </div>
-            </section>
-          )}
+            </div>
+          </section>
 
           <div className="mt-4 flex items-center gap-2 overflow-x-auto no-scrollbar pb-4">
             <FilterPill k="all" label="Todos" />
@@ -896,31 +790,51 @@ async function alternarPresenca(eventoId: string, statusAtual?: string) {
                 const isProcessando = confirmandoId === ev.id;
                 const paletaShow = String(ev?.paleta_cores || '').trim() || 'Look Padrão';
                 const isToday = isEventToday(ev.data);
+                const resumo = resumoDoEvento(ev);
+                const isCancelled = Boolean(ev?.cancelado);
+                const isReady = !isCancelled && resumo.readiness === 100;
 
                 return (
                   <section
                     key={ev.id}
                     className={cn(
-                      'relative p-6 rounded-[2.5rem] border transition-all duration-500 overflow-hidden',
-                      isToday
-                        ? 'scale-[1.02] z-10 border-transparent shadow-[0_0_30px_rgba(59,130,246,0.2)]'
-                        : isFalta
-                        ? 'bg-slate-950 border-red-900/20 opacity-40 scale-95'
-                        : 'bg-slate-900 border-white/5 shadow-2xl'
+                      'relative p-6 rounded-[2.5rem] border transition-all duration-500 overflow-hidden bg-slate-900',
+                      isCancelled
+                        ? 'border-red-500/30 opacity-50 grayscale-[0.45] shadow-none'
+                        : isReady
+                        ? 'border-blue-500/45 shadow-[0_0_30px_rgba(59,130,246,0.12)]'
+                        : 'border-yellow-400/55 shadow-[0_0_28px_rgba(250,204,21,0.10)]',
+                      isToday && !isCancelled && 'scale-[1.02] z-10 border-transparent',
+                      isFalta && !isCancelled && 'opacity-75'
                     )}
                   >
-                    <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-50" />
+                    <div className={cn(
+                      "absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent to-transparent opacity-70",
+                      isCancelled ? "via-red-500" : isReady ? "via-blue-500" : "via-yellow-400"
+                    )} />
 
-                    {isToday && (
+                    {isToday && !isCancelled && (
                       <>
-                        <div className="absolute inset-[-1000%] animate-spin-slow [background:conic-gradient(from_90deg_at_50%_50%,#0ea5e9_0%,#3b82f6_50%,#0ea5e9_100%)]" />
+                        <div
+                          className={cn(
+                            "absolute inset-[-1000%] animate-spin-slow",
+                            isReady
+                              ? "[background:conic-gradient(from_90deg_at_50%_50%,#0ea5e9_0%,#3b82f6_50%,#0ea5e9_100%)]"
+                              : "[background:conic-gradient(from_90deg_at_50%_50%,#f59e0b_0%,#fde047_50%,#f59e0b_100%)]"
+                          )}
+                        />
                         <div className="absolute inset-[2px] bg-slate-900 rounded-[2.4rem] z-0" />
                       </>
                     )}
 
                     <div className="relative z-10">
-                      {isToday && (
-                        <div className="absolute -top-5 justify-self-center bg-blue-600 px-4 py-1.5 rounded-full shadow-lg shadow-blue-600/40 animate-bounce">
+                      {isToday && !isCancelled && (
+                        <div className={cn(
+                          "absolute -top-5 justify-self-center px-4 py-1.5 rounded-full shadow-lg animate-bounce",
+                          isReady
+                            ? "bg-blue-600 shadow-blue-600/40"
+                            : "bg-yellow-400 text-slate-950 shadow-yellow-400/30"
+                        )}>
                           <span className="text-[10px] font-black uppercase tracking-[0.2em] text-white">
                             Evento Hoje
                           </span>
@@ -928,6 +842,24 @@ async function alternarPresenca(eventoId: string, statusAtual?: string) {
                       )}
 
                       <div className="flex gap-2 mb-4 overflow-x-auto no-scrollbar flex-wrap">
+                        {isCancelled ? (
+                          <span className="text-[8px] font-black px-2 py-1 rounded-md uppercase tracking-widest whitespace-nowrap border bg-red-500/10 border-red-500/30 text-red-300">
+                            ✕ EVENTO CANCELADO
+                          </span>
+                        ) : (
+                          <span
+                            className={cn(
+                              'text-[8px] font-black px-2 py-1 rounded-md uppercase tracking-widest whitespace-nowrap border',
+                              isReady
+                                ? 'bg-blue-500/10 border-blue-500/25 text-blue-300'
+                                : 'bg-yellow-400/10 border-yellow-400/30 text-yellow-300'
+                            )}
+                          >
+                            {isReady
+                              ? '✓ 100% PRONTO'
+                              : `⚠ ${resumo.readiness}% • ${resumo.pending} pendência${resumo.pending === 1 ? '' : 's'}`}
+                          </span>
+                        )}
                         {participantes.length === 0 && (
                           <span className="bg-red-500/10 border border-red-500/20 text-red-500 text-[8px] font-black px-2 py-1 rounded-md uppercase tracking-widest animate-pulse whitespace-nowrap">
                             ⚠️ SEM CONFIRMADOS
@@ -955,20 +887,46 @@ async function alternarPresenca(eventoId: string, statusAtual?: string) {
                           <div className="mt-3 flex items-center gap-2 text-[9px] font-black text-blue-500 bg-blue-500/10 w-fit px-3 py-1.5 rounded-full border border-blue-500/20 uppercase">
                             <Palette size={12} /> {paletaShow}
                           </div>
+                          {isCancelled && (
+                            <p className="mt-3 max-w-xl text-[10px] font-bold uppercase tracking-wide text-red-300">
+                              Cancelado{ev?.motivo_cancelamento ? ` • ${ev.motivo_cancelamento}` : ''}
+                            </p>
+                          )}
                         </div>
 
                         <Link
                           href={`/eventos/${ev.id}`}
-                          className="size-14 bg-slate-800 border border-white/5 rounded-2xl flex flex-col items-center justify-center text-blue-400 hover:text-blue-300 hover:border-blue-500/50 active:scale-95 transition-all"
-                          title="Abrir central do evento"
+                          className={cn(
+                            'size-14 rounded-2xl flex flex-col items-center justify-center border active:scale-95 transition-all',
+                            isCancelled
+                              ? 'bg-slate-800 border-white/5 text-slate-500 hover:text-slate-300'
+                              : isReady
+                              ? 'bg-slate-800 border-blue-500/20 text-blue-400 hover:text-blue-300 hover:border-blue-500/50'
+                              : 'bg-yellow-400/10 border-yellow-400/35 text-yellow-300 hover:bg-yellow-400/15 hover:border-yellow-300/60 animate-pulse'
+                          )}
+                          title={isCancelled ? 'Ver evento cancelado' : isReady ? 'Abrir central do evento' : 'Averiguar pendências do evento'}
                         >
-                          <Gauge size={20} />
+                          {isCancelled ? <XCircle size={20} /> : isReady ? <Gauge size={20} /> : <AlertCircle size={22} />}
                         </Link>
+
+                        {!isCancelled && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEventoParaCancelar(ev);
+                            setMotivoCancelamento('');
+                          }}
+                          className="size-12 sm:size-14 rounded-2xl border border-red-500/20 bg-red-500/[0.07] flex items-center justify-center text-red-400 transition-all hover:bg-red-500/15 hover:border-red-500/40 active:scale-95"
+                          title="Cancelar evento"
+                        >
+                          <XCircle size={21} />
+                        </button>
+                        )}
 
                         {ev.recorrencia_id && (
                           <Link
                             href="/configuracoes/recorrencias"
-                            className="size-14 bg-slate-800 border border-white/5 rounded-2xl flex items-center justify-center text-blue-400 hover:text-blue-300 hover:border-blue-500/50 active:scale-95 transition-all"
+                            className="size-12 sm:size-14 bg-slate-800 border border-white/5 rounded-2xl flex items-center justify-center text-blue-400 hover:text-blue-300 hover:border-blue-500/50 active:scale-95 transition-all"
                             title="Ver regra de recorrência"
                           >
                             <Repeat size={20} />
@@ -977,7 +935,7 @@ async function alternarPresenca(eventoId: string, statusAtual?: string) {
 
                         <button
                           onClick={() => alternarPresenca(ev.id, escalaPropria?.status)}
-                          disabled={!perfilAtivo || isProcessando}
+                          disabled={!perfilAtivo || isProcessando || isCancelled}
                           className={cn(
                             'p-4 rounded-2xl transition-all relative flex items-center justify-center shrink-0',
                             isConfirmado
@@ -985,7 +943,7 @@ async function alternarPresenca(eventoId: string, statusAtual?: string) {
                               : isFalta
                               ? 'bg-red-600 text-white'
                               : 'bg-slate-800 text-slate-500',
-                            (!perfilAtivo || isProcessando) && 'opacity-60'
+                            (!perfilAtivo || isProcessando || isCancelled) && 'opacity-40 cursor-not-allowed'
                           )}
                         >                                    
 
@@ -1112,12 +1070,18 @@ async function alternarPresenca(eventoId: string, statusAtual?: string) {
                         </div>
                       </div>
 
-                      <Link
-                        href={`/live/${ev.id}`}
-                        className="w-full bg-blue-600 hover:bg-blue-500 py-5 rounded-3xl flex items-center justify-center gap-3 text-[11px] font-black uppercase tracking-[0.2em] shadow-xl shadow-blue-600/30 transition-all active:scale-95"
-                      >
-                        <PlayCircle size={20} /> Abrir Show Non-Stop
-                      </Link>
+                      {isCancelled ? (
+                        <div className="w-full border border-red-500/20 bg-red-500/[0.06] py-5 rounded-3xl flex items-center justify-center gap-3 text-[11px] font-black uppercase tracking-[0.2em] text-red-300">
+                          <XCircle size={20} /> Evento cancelado
+                        </div>
+                      ) : (
+                        <Link
+                          href={`/live/${ev.id}`}
+                          className="w-full bg-blue-600 hover:bg-blue-500 py-5 rounded-3xl flex items-center justify-center gap-3 text-[11px] font-black uppercase tracking-[0.2em] shadow-xl shadow-blue-600/30 transition-all active:scale-95"
+                        >
+                          <PlayCircle size={20} /> Abrir Show Non-Stop
+                        </Link>
+                      )}
                     </div>
                   </section>
                 );
@@ -1125,33 +1089,68 @@ async function alternarPresenca(eventoId: string, statusAtual?: string) {
             )}
           </div>
 
-          {/* Card extra: Gerenciar repertórios */}
-          <div className="relative overflow-hidden gap-4">
-            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-50" />
 
-            <Link
-              href="/eventos/setlists"
-              className="col-span-2 flex items-center justify-between p-7 bg-blue-600/5 border border-blue-500/20 rounded-[2.5rem] hover:bg-blue-600/10 transition-all gap-4"
-            >
-              <div className="flex items-center gap-5 min-w-0 relative overflow-hidden">
-
-                <div className="p-3 bg-blue-600 rounded-2xl text-white shadow-lg shadow-blue-600/40 shrink-0">
-                  <Music2 size={28} />
+          {eventoParaCancelar && (
+            <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center bg-black/75 p-3 sm:p-6 backdrop-blur-sm">
+              <div className="w-full max-w-lg rounded-[2rem] border border-red-500/25 bg-slate-950 p-5 sm:p-6 shadow-2xl shadow-black/50">
+                <div className="flex items-start gap-4">
+                  <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-red-500/10 text-red-400">
+                    <XCircle size={24} />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-[9px] font-black uppercase tracking-[0.2em] text-red-400">Cancelar evento</p>
+                    <h3 className="mt-1 break-words text-xl font-black uppercase tracking-tight text-white">
+                      {eventoParaCancelar.local || 'Evento'}
+                    </h3>
+                    <p className="mt-2 text-xs font-bold leading-relaxed text-slate-400">
+                      O evento será retirado da agenda ativa e mantido no histórico como cancelado.
+                      {eventoParaCancelar.recorrencia_id
+                        ? ' Esta ação cancela somente esta ocorrência; a recorrência continua ativa.'
+                        : ''}
+                    </p>
+                  </div>
                 </div>
 
-                <div className="min-w-0">
-                  <span className="block font-black uppercase text-[14px] tracking-[0.2em] text-white">
-                    Gerenciar repertórios
+                <label className="mt-5 block">
+                  <span className="mb-2 block text-[9px] font-black uppercase tracking-widest text-slate-500">
+                    Motivo opcional
                   </span>
-                  <span className="text-[9px] text-blue-500 font-bold uppercase tracking-widest">
-                    Acesso geral a todas as músicas
-                  </span>
+                  <textarea
+                    value={motivoCancelamento}
+                    onChange={(event) => setMotivoCancelamento(event.target.value)}
+                    maxLength={280}
+                    rows={3}
+                    placeholder="Ex.: imprevisto no local, ausência, mudança de agenda..."
+                    className="w-full resize-none rounded-2xl border border-white/10 bg-white/[0.04] p-4 text-sm font-bold text-white outline-none transition focus:border-red-500/40"
+                  />
+                </label>
+
+                <div className="mt-5 grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (cancelandoId) return;
+                      setEventoParaCancelar(null);
+                      setMotivoCancelamento('');
+                    }}
+                    disabled={Boolean(cancelandoId)}
+                    className="min-h-12 rounded-2xl border border-white/10 bg-white/[0.04] text-[10px] font-black uppercase tracking-widest text-slate-300 disabled:opacity-50"
+                  >
+                    Manter evento
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void cancelarEvento()}
+                    disabled={Boolean(cancelandoId)}
+                    className="min-h-12 rounded-2xl bg-red-600 text-[10px] font-black uppercase tracking-widest text-white transition hover:bg-red-500 disabled:opacity-60"
+                  >
+                    {cancelandoId ? 'Cancelando...' : 'Confirmar cancelamento'}
+                  </button>
                 </div>
               </div>
+            </div>
+          )}
 
-              <ChevronRight size={20} className="text-blue-500 shrink-0" />
-            </Link>
-          </div>
         </div>
       </div>
     </SubscriptionGuard>

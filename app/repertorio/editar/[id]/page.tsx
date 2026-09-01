@@ -27,6 +27,7 @@ import { useOrg } from '@/contexts/OrgContext';
 import SubscriptionGuard from '@/components/SubscriptionGuard';
 import SongPreviewModal from '@/components/SongPreviewModal';
 import SongTimingEditor from '@/components/SongTimingEditor';
+import HarmonyReusePicker, { type HarmonyReuseSource } from '@/components/HarmonyReusePicker';
 import MemberStageNoteEditor from '@/components/MemberStageNoteEditor';
 import SongVersionHistory from '@/components/SongVersionHistory';
 import { mapChordCellChords } from '@/lib/songStage';
@@ -740,6 +741,58 @@ export default function EditarMusica() {
     resetEditorParaNovo();
   }, [editingBlockId, blocoAtual, formatAcordesToText, resetEditorParaNovo]);
 
+  const fontesReaproveitamento = useMemo<HarmonyReuseSource[]>(
+    () =>
+      blocosDisponiveis.map((block) => ({
+        id: String(block.id),
+        label: String(block.nome_personalizado || '').trim() || String(block.tipo || 'Bloco'),
+        duration: Math.max(1, Number(block.duracao_compassos || 4) || 4),
+        chords: String(block.acordes || ''),
+      })),
+    [blocosDisponiveis],
+  );
+
+  const repetirBlocoNaTimeline = useCallback(
+    (source: HarmonyReuseSource) => {
+      const block = blocosDisponiveis.find((item) => String(item.id) === String(source.id));
+      if (!block) return;
+      setTimeline((prev) => [...prev, block]);
+    },
+    [blocosDisponiveis],
+  );
+
+  const copiarSomenteHarmonia = useCallback(
+    (source: HarmonyReuseSource) => {
+      const block = blocosDisponiveis.find((item) => String(item.id) === String(source.id));
+      if (!block) return;
+      const duration = Math.max(1, Number(block.duracao_compassos || 4) || 4);
+      setBlocoAtual((prev) => ({
+        ...prev,
+        duracao_compassos: duration,
+        acordes: parseAcordesToArray(block.acordes, duration),
+      }));
+    },
+    [blocosDisponiveis, parseAcordesToArray],
+  );
+
+  const duplicarBlocoParaNovo = useCallback(
+    (source: HarmonyReuseSource) => {
+      const block = blocosDisponiveis.find((item) => String(item.id) === String(source.id));
+      if (!block) return;
+      const duration = Math.max(1, Number(block.duracao_compassos || 4) || 4);
+      const label = String(block.nome_personalizado || '').trim() || String(block.tipo || 'Bloco');
+      setEditingBlockId(null);
+      setBlocoAtual({
+        tipo: String(block.tipo || 'Verso'),
+        nome_personalizado: `${label} cópia`,
+        letra: String(block.letra || ''),
+        duracao_compassos: duration,
+        acordes: parseAcordesToArray(block.acordes, duration),
+      });
+    },
+    [blocosDisponiveis, parseAcordesToArray],
+  );
+
   // =========================
   // ✅ Catálogo: remover bloco
   // =========================
@@ -1300,10 +1353,19 @@ export default function EditarMusica() {
                 />
               </div>
 
+              <HarmonyReusePicker
+                sources={fontesReaproveitamento}
+                currentDuration={blocoAtual.duracao_compassos}
+                onRepeat={repetirBlocoNaTimeline}
+                onCopyHarmony={copiarSomenteHarmonia}
+                onDuplicateAll={duplicarBlocoParaNovo}
+              />
+
               <SongTimingEditor
                 duration={blocoAtual.duracao_compassos}
                 chords={blocoAtual.acordes}
                 lyrics={blocoAtual.letra}
+                keySignature={dadosBase.tom}
                 onDurationChange={handleCompassoChange}
                 onChordChange={updateAcordeNoCompasso}
                 onLyricsChange={(value) => setBlocoAtual((prev) => ({ ...prev, letra: value }))}

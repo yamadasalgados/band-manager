@@ -23,6 +23,7 @@ import { useOrg } from '@/contexts/OrgContext';
 import SubscriptionGuard from '@/components/SubscriptionGuard';
 import SongPreviewModal from '@/components/SongPreviewModal';
 import SongTimingEditor from '@/components/SongTimingEditor';
+import HarmonyReusePicker, { type HarmonyReuseSource } from '@/components/HarmonyReusePicker';
 
 type LocalBlock = {
   tempId: string;
@@ -175,6 +176,48 @@ export default function NovoRepertorioInteligente() {
     };
     setBlocosDisponiveis((prev) => [...prev, novo]);
     resetEditor();
+  };
+
+  const fontesReaproveitamento = useMemo<HarmonyReuseSource[]>(
+    () =>
+      blocosDisponiveis.map((block) => ({
+        id: block.tempId,
+        label: blockLabel(block),
+        duration: Math.max(1, Number(block.duracao_compassos || 4) || 4),
+        chords: String(block.acordes || ''),
+      })),
+    [blocosDisponiveis],
+  );
+
+  const repetirBlocoNaTimeline = (source: HarmonyReuseSource) => {
+    const block = blocosDisponiveis.find((item) => item.tempId === source.id);
+    if (!block) return;
+    setTimeline((prev) => [...prev, block]);
+  };
+
+  const copiarSomenteHarmonia = (source: HarmonyReuseSource) => {
+    const block = blocosDisponiveis.find((item) => item.tempId === source.id);
+    if (!block) return;
+    const duration = Math.max(1, Number(block.duracao_compassos || 4) || 4);
+    setBlocoAtual((prev) => ({
+      ...prev,
+      duracao_compassos: duration,
+      acordes: parseChords(block.acordes, duration),
+    }));
+  };
+
+  const duplicarBlocoParaNovo = (source: HarmonyReuseSource) => {
+    const block = blocosDisponiveis.find((item) => item.tempId === source.id);
+    if (!block) return;
+    const duration = Math.max(1, Number(block.duracao_compassos || 4) || 4);
+    setEditingBlockId(null);
+    setBlocoAtual({
+      tipo: block.tipo || 'Verso',
+      nome_personalizado: `${blockLabel(block)} cópia`,
+      letra: block.letra || '',
+      duracao_compassos: duration,
+      acordes: parseChords(block.acordes, duration),
+    });
   };
 
   const removerBlocoDoCatalogo = (tempId: string) => {
@@ -425,10 +468,19 @@ export default function NovoRepertorioInteligente() {
                 onChange={(event) => setBlocoAtual({ ...blocoAtual, nome_personalizado: event.target.value })}
               />
 
+              <HarmonyReusePicker
+                sources={fontesReaproveitamento}
+                currentDuration={blocoAtual.duracao_compassos}
+                onRepeat={repetirBlocoNaTimeline}
+                onCopyHarmony={copiarSomenteHarmonia}
+                onDuplicateAll={duplicarBlocoParaNovo}
+              />
+
               <SongTimingEditor
                 duration={blocoAtual.duracao_compassos}
                 chords={blocoAtual.acordes}
                 lyrics={blocoAtual.letra}
+                keySignature={dadosBase.tom}
                 onDurationChange={handleCompassoChange}
                 onChordChange={updateAcordeNoCompasso}
                 onLyricsChange={(value) => setBlocoAtual((prev) => ({ ...prev, letra: value }))}

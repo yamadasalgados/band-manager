@@ -1,9 +1,10 @@
 'use client';
 
-import { useMemo, useState } from 'react';
-import { AlignLeft, Clock3, MousePointer2, Plus, Rows3, X } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { AlignLeft, Check, Clock3, MousePointer2, Plus, Rows3, X } from 'lucide-react';
 import { ChordLyricLine } from '@/components/SongStageRenderer';
 import { parseChordCell, serializeChordAnchors, type ChordAnchor } from '@/lib/songStage';
+import { buildChordPalette, normalizeChordInput, type ChordPaletteEntry } from '@/lib/chordPalette';
 
 type SongTimingEditorProps = {
   duration: number;
@@ -12,13 +13,18 @@ type SongTimingEditorProps = {
   onDurationChange: (value: number) => void;
   onChordChange: (index: number, value: string) => void;
   onLyricsChange: (value: string) => void;
+  keySignature?: string;
   maxMeasures?: number;
 };
 
-function smartChordCase(value: string) {
-  const raw = String(value || '');
-  if (!raw) return '';
-  return raw.charAt(0).toUpperCase() + raw.slice(1);
+function uniqueStrings(items: string[]) {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const key = item.trim();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function wordPositions(text: string) {
@@ -38,11 +44,55 @@ export default function SongTimingEditor({
   onDurationChange,
   onChordChange,
   onLyricsChange,
+  keySignature = '',
   maxMeasures = 16,
 }: SongTimingEditorProps) {
   const [mode, setMode] = useState<'sync' | 'free'>('sync');
   const [anchorDrafts, setAnchorDrafts] = useState<Record<number, string>>({});
+  const [enabledChords, setEnabledChords] = useState<string[]>([]);
+  const [customPalette, setCustomPalette] = useState<ChordPaletteEntry[]>([]);
+  const [customChordDraft, setCustomChordDraft] = useState('');
+  const [lyricPoolDraft, setLyricPoolDraft] = useState('');
+  const [lyricPoolLines, setLyricPoolLines] = useState<string[]>([]);
+  const [lyricPoolCursor, setLyricPoolCursor] = useState(0);
+  const [ignoreBlankLyricPoolLines, setIgnoreBlankLyricPoolLines] = useState(true);
   const safeDuration = Math.max(1, Math.min(maxMeasures, Number(duration) || 1));
+
+  const suggestedPalette = useMemo(() => buildChordPalette(keySignature), [keySignature]);
+
+  const usedChords = useMemo(
+    () =>
+      uniqueStrings(
+        chords.flatMap((cell) => parseChordCell(cell).map((anchor) => String(anchor.chord || '').trim())),
+      ),
+    [chords],
+  );
+
+  useEffect(() => {
+    const defaults = suggestedPalette.map((entry) => entry.chord);
+    setEnabledChords(uniqueStrings([...defaults, ...usedChords]));
+    setCustomPalette((prev) => prev.filter((entry) => usedChords.includes(entry.chord)));
+  }, [keySignature]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (usedChords.length === 0) return;
+    setEnabledChords((prev) => uniqueStrings([...prev, ...usedChords]));
+  }, [usedChords]);
+
+  const paletteEntries = useMemo(() => {
+    const byChord = new Map<string, ChordPaletteEntry>();
+    suggestedPalette.forEach((entry) => byChord.set(entry.chord, entry));
+    customPalette.forEach((entry) => byChord.set(entry.chord, entry));
+    usedChords.forEach((chord) => {
+      if (!byChord.has(chord)) byChord.set(chord, { chord, degree: 'extra', kind: 'custom' });
+    });
+    return [...byChord.values()];
+  }, [customPalette, suggestedPalette, usedChords]);
+
+  const activePalette = useMemo(
+    () => paletteEntries.filter((entry) => enabledChords.includes(entry.chord)),
+    [enabledChords, paletteEntries],
+  );
 
   const rawLines = useMemo(() => {
     if (!lyrics) return [];
@@ -60,6 +110,26 @@ export default function SongTimingEditor({
     [rawLines, safeDuration],
   );
 
+  const nextLyricPoolLine = lyricPoolLines[lyricPoolCursor] ?? '';
+  const lyricPoolRemaining = Math.max(0, lyricPoolLines.length - lyricPoolCursor);
+
+  const loadLyricPool = () => {
+    const normalized = String(lyricPoolDraft || '').replace(/\r\n?/g, '\n');
+    const prepared = normalized
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => (ignoreBlankLyricPoolLines ? line.length > 0 : true));
+
+    setLyricPoolLines(prepared);
+    setLyricPoolCursor(0);
+  };
+
+  const clearLyricPool = () => {
+    setLyricPoolDraft('');
+    setLyricPoolLines([]);
+    setLyricPoolCursor(0);
+  };
+
   const changeLyricLine = (index: number, value: string) => {
     const next = rawLines.length ? [...rawLines] : [];
     while (next.length < safeDuration) next.push('');
@@ -67,24 +137,63 @@ export default function SongTimingEditor({
     onLyricsChange(next.join('\n'));
   };
 
+  const useNextLyricLine = (measureIndex: number) => {
+    if (lyricPoolCursor >= lyricPoolLines.length) return;
+    changeLyricLine(measureIndex, lyricPoolLines[lyricPoolCursor] ?? '');
+    setLyricPoolCursor((current) => Math.min(lyricPoolLines.length, current + 1));
+  };
+
+  const fillEmptyMeasuresFromLyricPool = () => {
+    if (lyricPoolCursor >= lyricPoolLines.length) return;
+
+    const next = rawLines.length ? [...rawLines] : [];
+    while (next.length < safeDuration) next.push('');
+
+    let cursor = lyricPoolCursor;
+    for (let index = 0; index < safeDuration && cursor < lyricPoolLines.length; index += 1) {
+      if (String(next[index] || '').trim()) continue;
+      next[index] = lyricPoolLines[cursor] ?? '';
+      cursor += 1;
+    }
+
+    onLyricsChange(next.join('\n'));
+    setLyricPoolCursor(cursor);
+  };
+
   const setAnchors = (measureIndex: number, anchors: ChordAnchor[]) => {
     onChordChange(measureIndex, serializeChordAnchors(anchors));
   };
 
   const addAnchor = (measureIndex: number, charIndex: number) => {
-    const chord = smartChordCase(String(anchorDrafts[measureIndex] || '').trim());
+    const chord = normalizeChordInput(String(anchorDrafts[measureIndex] || ''));
     if (!chord) return;
 
     const current = parseChordCell(chords[measureIndex]);
     const next = current.filter((anchor) => anchor.charIndex !== charIndex);
     next.push({ chord, charIndex });
     setAnchors(measureIndex, next);
-    setAnchorDrafts((prev) => ({ ...prev, [measureIndex]: '' }));
   };
 
   const removeAnchor = (measureIndex: number, charIndex: number) => {
     const current = parseChordCell(chords[measureIndex]);
     setAnchors(measureIndex, current.filter((anchor) => anchor.charIndex !== charIndex));
+  };
+
+  const togglePaletteChord = (chord: string) => {
+    setEnabledChords((prev) =>
+      prev.includes(chord) ? prev.filter((item) => item !== chord) : [...prev, chord],
+    );
+  };
+
+  const addCustomChord = () => {
+    const chord = normalizeChordInput(customChordDraft);
+    if (!chord) return;
+    setCustomPalette((prev) => {
+      if (prev.some((entry) => entry.chord === chord)) return prev;
+      return [...prev, { chord, degree: 'extra', kind: 'custom' }];
+    });
+    setEnabledChords((prev) => uniqueStrings([...prev, chord]));
+    setCustomChordDraft('');
   };
 
   return (
@@ -107,13 +216,208 @@ export default function SongTimingEditor({
         />
       </div>
 
+      <div className="rounded-2xl border border-blue-500/15 bg-blue-500/[0.04] p-4 space-y-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-blue-300">Paleta rápida do bloco</p>
+            <p className="mt-1 text-[11px] text-slate-500 max-w-2xl">
+              {suggestedPalette.length > 0
+                ? `Tom ${keySignature}: escolha os acordes que podem aparecer neste bloco. Depois você só seleciona o acorde e toca na posição da letra.`
+                : 'Defina o tom da música para gerar automaticamente a escala, sétimas e inversões comuns.'}
+            </p>
+          </div>
+          {suggestedPalette.length > 0 && (
+            <span className="rounded-lg border border-blue-500/15 bg-blue-500/5 px-2.5 py-1 text-[9px] font-black uppercase tracking-wider text-blue-300">
+              {enabledChords.length} ativos
+            </span>
+          )}
+        </div>
+
+        {paletteEntries.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {paletteEntries.map((entry) => {
+              const enabled = enabledChords.includes(entry.chord);
+              return (
+                <button
+                  key={`${entry.kind}-${entry.chord}`}
+                  type="button"
+                  onClick={() => togglePaletteChord(entry.chord)}
+                  className={`min-h-10 rounded-xl border px-3 py-2 text-left transition-all ${
+                    enabled
+                      ? 'border-yellow-500/30 bg-yellow-500/10 text-yellow-200'
+                      : 'border-white/5 bg-slate-950/50 text-slate-600 hover:text-slate-300'
+                  }`}
+                  title={enabled ? 'Remover da paleta deste bloco' : 'Usar neste bloco'}
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <span className="font-mono text-sm font-black">{entry.chord}</span>
+                    <span className="text-[9px] font-black uppercase tracking-wider opacity-60">{entry.degree}</span>
+                    {enabled && <Check size={12} />}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="flex flex-col sm:flex-row gap-2">
+          <input
+            value={customChordDraft}
+            onChange={(event) => setCustomChordDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                addCustomChord();
+              }
+            }}
+            placeholder="Outro acorde: F/A, G7, Csus4..."
+            className="min-h-11 flex-1 rounded-xl border border-white/10 bg-slate-950/70 px-3 font-mono text-sm font-bold text-yellow-300 outline-none focus:border-yellow-500/40"
+          />
+          <button
+            type="button"
+            onClick={addCustomChord}
+            disabled={!customChordDraft.trim()}
+            className="min-h-11 rounded-xl border border-white/10 bg-white/5 px-4 text-[10px] font-black uppercase tracking-wider text-slate-300 disabled:opacity-30"
+          >
+            + Outro acorde
+          </button>
+        </div>
+
+        {suggestedPalette.length > 0 && (
+          <p className="text-[9px] leading-relaxed text-slate-600">
+            Padrão maior: <span className="text-slate-500">I · ii7 · iii7 · IV · V · vi7 · vii°</span> + inversões comuns <span className="text-slate-500">I/3 e V/7</span>. Ex.: em C, C · Dm7 · Em7 · F · G · Am7 · B° · C/E · G/B.
+          </p>
+        )}
+      </div>
+
+      <div className="rounded-2xl border border-violet-500/15 bg-violet-500/[0.035] p-4 space-y-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-violet-300">Banco de letra da música</p>
+            <p className="mt-1 text-[11px] text-slate-500 max-w-2xl">
+              Cole a letra inteira uma vez. Enquanto você monta os blocos, use a próxima linha em cada compasso sem voltar ao site de letras.
+            </p>
+          </div>
+          {lyricPoolLines.length > 0 && (
+            <span className="rounded-lg border border-violet-500/15 bg-violet-500/5 px-2.5 py-1 text-[9px] font-black uppercase tracking-wider text-violet-300">
+              {lyricPoolCursor}/{lyricPoolLines.length} usadas · {lyricPoolRemaining} restantes
+            </span>
+          )}
+        </div>
+
+        <textarea
+          value={lyricPoolDraft}
+          onChange={(event) => setLyricPoolDraft(event.target.value)}
+          rows={6}
+          placeholder={"Cole aqui a letra completa da música…\nCada quebra de linha vira uma linha disponível para os compassos."}
+          className="w-full rounded-xl border border-white/10 bg-slate-950/70 p-3 text-sm leading-relaxed text-slate-200 outline-none focus:border-violet-500/35 resize-y"
+        />
+
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <label className="inline-flex items-center gap-2 text-[10px] font-bold text-slate-500 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={ignoreBlankLyricPoolLines}
+              onChange={(event) => setIgnoreBlankLyricPoolLines(event.target.checked)}
+              className="accent-violet-500"
+            />
+            Ignorar linhas vazias ao preparar
+          </label>
+
+          <div className="flex flex-wrap gap-2">
+            {lyricPoolLines.length > 0 && (
+              <button
+                type="button"
+                onClick={fillEmptyMeasuresFromLyricPool}
+                disabled={lyricPoolRemaining === 0}
+                className="min-h-10 rounded-xl border border-violet-500/20 bg-violet-500/10 px-3 text-[9px] font-black uppercase tracking-wider text-violet-300 disabled:opacity-30"
+                title="Distribui as próximas linhas somente nos compassos que ainda estão vazios"
+              >
+                Preencher vazios
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={loadLyricPool}
+              disabled={!lyricPoolDraft.trim()}
+              className="min-h-10 rounded-xl border border-white/10 bg-white/5 px-3 text-[9px] font-black uppercase tracking-wider text-slate-300 disabled:opacity-30"
+            >
+              Preparar linhas
+            </button>
+            {lyricPoolLines.length > 0 && (
+              <button
+                type="button"
+                onClick={clearLyricPool}
+                className="min-h-10 rounded-xl border border-white/5 bg-slate-950/40 px-3 text-[9px] font-black uppercase tracking-wider text-slate-600 hover:text-red-300"
+              >
+                Limpar
+              </button>
+            )}
+          </div>
+        </div>
+
+        {lyricPoolLines.length > 0 && (
+          <div className="rounded-xl border border-white/5 bg-slate-950/45 p-3 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-[8px] font-black uppercase tracking-widest text-slate-600">Próxima linha</p>
+                <p className="mt-1 truncate text-sm font-bold text-violet-200">
+                  {nextLyricPoolLine || (lyricPoolRemaining === 0 ? 'Todas as linhas foram usadas.' : 'Linha vazia')}
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setLyricPoolCursor((current) => Math.max(0, current - 1))}
+                  disabled={lyricPoolCursor === 0}
+                  className="min-h-9 rounded-lg border border-white/5 bg-white/[0.03] px-2.5 text-[9px] font-black uppercase text-slate-500 disabled:opacity-25"
+                >
+                  ← Voltar 1
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLyricPoolCursor((current) => Math.min(lyricPoolLines.length, current + 1))}
+                  disabled={lyricPoolRemaining === 0}
+                  className="min-h-9 rounded-lg border border-white/5 bg-white/[0.03] px-2.5 text-[9px] font-black uppercase text-slate-500 disabled:opacity-25"
+                >
+                  Pular →
+                </button>
+              </div>
+            </div>
+
+            {lyricPoolRemaining > 0 && (
+              <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
+                {lyricPoolLines.slice(lyricPoolCursor, lyricPoolCursor + 6).map((line, offset) => {
+                  const absoluteIndex = lyricPoolCursor + offset;
+                  return (
+                    <button
+                      key={`${absoluteIndex}-${line}`}
+                      type="button"
+                      onClick={() => setLyricPoolCursor(absoluteIndex)}
+                      className={`min-w-[170px] max-w-[240px] rounded-xl border px-3 py-2 text-left transition-all ${
+                        offset === 0
+                          ? 'border-violet-500/25 bg-violet-500/10 text-violet-200'
+                          : 'border-white/5 bg-slate-950/60 text-slate-500 hover:text-slate-300'
+                      }`}
+                    >
+                      <span className="block text-[8px] font-black uppercase tracking-wider opacity-50">Linha {absoluteIndex + 1}</span>
+                      <span className="mt-1 block truncate text-[10px] font-bold">{line || '(linha vazia)'}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
           <p className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">
             Cifra + letra
           </p>
           <p className="text-[11px] text-slate-600 mt-1 max-w-2xl">
-            No modo por compasso você pode colocar vários acordes sobre as palavras exatas. Músicas antigas continuam compatíveis.
+            No modo por compasso, selecione um acorde da paleta e toque na palavra exata onde ele entra.
           </p>
         </div>
 
@@ -144,7 +448,7 @@ export default function SongTimingEditor({
           {measureLines.map((line, index) => {
             const anchors = parseChordCell(chords[index]);
             const words = wordPositions(line);
-            const draft = anchorDrafts[index] || '';
+            const selectedChord = anchorDrafts[index] || '';
 
             return (
               <div key={index} className="bg-slate-950/35 border border-white/5 rounded-2xl p-3 sm:p-4 space-y-3">
@@ -164,6 +468,17 @@ export default function SongTimingEditor({
                     <span className="absolute top-1 left-3 text-[8px] font-black text-slate-600 uppercase tracking-wider">
                       Letra
                     </span>
+                    {lyricPoolRemaining > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => useNextLyricLine(index)}
+                        className="mt-2 w-full rounded-xl border border-violet-500/15 bg-violet-500/[0.06] px-3 py-2 text-left text-[9px] font-black text-violet-300 hover:border-violet-500/30 transition-all"
+                        title={line.trim() ? 'Substituir a letra deste compasso pela próxima linha do banco' : 'Usar a próxima linha do banco neste compasso'}
+                      >
+                        <span className="uppercase tracking-wider opacity-60">{line.trim() ? 'Substituir pela próxima' : 'Usar próxima linha'}:</span>{' '}
+                        <span className="normal-case tracking-normal text-violet-100">{nextLyricPoolLine || '(linha vazia)'}</span>
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -171,10 +486,10 @@ export default function SongTimingEditor({
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <p className="text-[9px] font-black uppercase tracking-[0.16em] text-yellow-500/80 flex items-center gap-1.5">
-                        <MousePointer2 size={12} /> Posicionar acorde sobre a palavra
+                        <MousePointer2 size={12} /> 1. Escolha o acorde · 2. Toque na posição
                       </p>
                       <p className="text-[9px] text-slate-600 mt-1">
-                        Digite o acorde e toque na palavra onde a troca acontece.
+                        O acorde selecionado fica ativo para você posicionar quantas vezes precisar.
                       </p>
                     </div>
                     {!!anchors.length && (
@@ -184,28 +499,53 @@ export default function SongTimingEditor({
                     )}
                   </div>
 
-                  <div className="flex gap-2">
-                    <input
-                      value={draft}
-                      onChange={(event) => setAnchorDrafts((prev) => ({ ...prev, [index]: smartChordCase(event.target.value) }))}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter') {
-                          event.preventDefault();
-                          addAnchor(index, 0);
-                        }
-                      }}
-                      className="w-32 sm:w-40 bg-slate-900 border border-yellow-500/20 rounded-xl px-3 py-2 outline-none font-mono font-black text-yellow-400 focus:border-yellow-500/50"
-                      placeholder="Ex: Em7"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => addAnchor(index, 0)}
-                      disabled={!draft.trim()}
-                      className="px-3 py-2 rounded-xl border border-white/10 bg-white/5 text-[9px] font-black uppercase tracking-wider text-slate-300 disabled:opacity-30 flex items-center gap-1.5"
-                      title="Colocar no começo da linha"
-                    >
-                      <Plus size={13} /> Início
-                    </button>
+                  <div className="flex flex-wrap gap-1.5">
+                    {activePalette.map((entry) => {
+                      const selected = selectedChord === entry.chord;
+                      return (
+                        <button
+                          key={`${index}-${entry.chord}`}
+                          type="button"
+                          onClick={() => setAnchorDrafts((prev) => ({ ...prev, [index]: entry.chord }))}
+                          className={`min-h-9 rounded-lg border px-2.5 py-1.5 transition-all ${
+                            selected
+                              ? 'border-yellow-400/50 bg-yellow-500/15 text-yellow-200 shadow-[0_0_18px_rgba(234,179,8,0.08)]'
+                              : 'border-white/5 bg-slate-900/80 text-slate-400 hover:border-yellow-500/25 hover:text-yellow-300'
+                          }`}
+                        >
+                          <span className="font-mono text-xs font-black">{entry.chord}</span>
+                          {entry.degree !== 'extra' && (
+                            <span className="ml-1.5 text-[8px] font-black uppercase opacity-50">{entry.degree}</span>
+                          )}
+                        </button>
+                      );
+                    })}
+                    {activePalette.length === 0 && (
+                      <span className="text-[10px] text-slate-700 italic">
+                        Ative acordes na paleta do bloco acima ou adicione um acorde personalizado.
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[9px] font-black uppercase tracking-wider text-slate-600">Selecionado:</span>
+                    <span className={`rounded-lg border px-2.5 py-1.5 font-mono text-xs font-black ${
+                      selectedChord
+                        ? 'border-yellow-500/25 bg-yellow-500/10 text-yellow-300'
+                        : 'border-white/5 bg-white/[0.02] text-slate-700'
+                    }`}>
+                      {selectedChord || 'nenhum'}
+                    </span>
+                    {selectedChord && (
+                      <button
+                        type="button"
+                        onClick={() => addAnchor(index, 0)}
+                        className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-[9px] font-black uppercase tracking-wider text-slate-400 hover:text-white"
+                        title="Colocar no início deste compasso"
+                      >
+                        <Plus size={11} className="inline mr-1" /> Início
+                      </button>
+                    )}
                   </div>
 
                   <div className="flex flex-wrap gap-1.5 min-h-10 items-center">
@@ -215,9 +555,9 @@ export default function SongTimingEditor({
                           key={word.key}
                           type="button"
                           onClick={() => addAnchor(index, word.start)}
-                          disabled={!draft.trim()}
-                          className="px-2 py-1.5 rounded-lg border border-white/5 bg-slate-900/80 text-xs font-bold text-slate-300 hover:border-yellow-500/30 hover:text-yellow-300 disabled:opacity-45 disabled:hover:text-slate-300"
-                          title={draft.trim() ? `Colocar ${draft} sobre “${word.label}”` : 'Digite um acorde primeiro'}
+                          disabled={!selectedChord}
+                          className="px-2 py-1.5 rounded-lg border border-white/5 bg-slate-900/80 text-xs font-bold text-slate-300 hover:border-yellow-500/30 hover:text-yellow-300 disabled:opacity-35 disabled:hover:text-slate-300"
+                          title={selectedChord ? `Colocar ${selectedChord} sobre “${word.label}”` : 'Escolha um acorde da paleta primeiro'}
                         >
                           {word.label}
                         </button>
@@ -271,7 +611,7 @@ export default function SongTimingEditor({
                 <div key={index} className="relative group overflow-hidden rounded-xl">
                   <input
                     value={names}
-                    onChange={(event) => onChordChange(index, smartChordCase(event.target.value))}
+                    onChange={(event) => onChordChange(index, normalizeChordInput(event.target.value))}
                     className="w-full bg-slate-950 p-3 pt-4 rounded-xl outline-none text-center font-mono font-black text-yellow-500 border border-white/5 focus:border-yellow-500/50 text-sm transition-all focus:bg-slate-900"
                     placeholder="—"
                     title="Edição rápida: ao alterar aqui, as posições avançadas deste compasso são substituídas por um acorde no início."
