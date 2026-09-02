@@ -162,9 +162,11 @@ type SyncMessage =
       resume?: boolean;
       maestroId?: string;
       maestroStartAtMs?: number;
+      nextBlockOverride?: number | null;
+      manualReturnBlock?: number | null;
     }
   | { kind: 'QUEUE'; senderId: string; musicaId: string | null }
-  | { kind: 'BLOCK_QUEUE'; senderId: string; blockIndex: number | null }
+  | { kind: 'BLOCK_QUEUE'; senderId: string; blockIndex: number | null; returnIndex?: number | null }
   | { kind: 'STATE_REQUEST'; senderId: string }
   | {
       kind: 'STATE';
@@ -178,6 +180,7 @@ type SyncMessage =
       semitons: number;
       queuedMusicaId?: string | null;
       nextBlockOverride?: number | null;
+      manualReturnBlock?: number | null;
       playbackMode?: LivePlaybackMode;
     }
   | { kind: 'PING'; senderId: string; pingId: string; t0: number } // t0 no relógio do follower
@@ -345,6 +348,11 @@ export default function ModoLiveNonStop() {
   const [showNextBlockMenu, setShowNextBlockMenu] = useState(false);
   const [nextBlockOverride, setNextBlockOverride] = useState<number | null>(null);
   const nextBlockOverrideRef = useRef<number | null>(null);
+  // Quando fazemos um desvio manual de uma única passagem (ex.: Intro -> Refrão),
+  // guardamos o ponto natural de retorno (Verso). Assim a música volta à sequência
+  // original depois do bloco extraordinário, sem editar a estrutura salva.
+  const [manualReturnBlock, setManualReturnBlock] = useState<number | null>(null);
+  const manualReturnBlockRef = useRef<number | null>(null);
   const [showHistory, setShowHistory] = useState<ShowHistoryEntry[]>([]);
   const activeRunLoggedRef = useRef(false);
   const lastPlaybackIndexRef = useRef(-1);
@@ -380,6 +388,7 @@ export default function ModoLiveNonStop() {
     semitons: 0,
     queuedMusicaId: null as string | null,
     nextBlockOverride: null as number | null,
+    manualReturnBlock: null as number | null,
     playbackMode: 'auto' as LivePlaybackMode,
   });
 
@@ -521,12 +530,37 @@ export default function ModoLiveNonStop() {
     if (nextBlockOverride !== null && nextBlockOverride >= 0 && nextBlockOverride < estruturaAtual.length) {
       return estruturaAtual[nextBlockOverride]?.bloco || null;
     }
+    if (playbackMode === 'manual' && manualReturnBlock !== null && manualReturnBlock >= 0 && manualReturnBlock < estruturaAtual.length) {
+      return estruturaAtual[manualReturnBlock]?.bloco || null;
+    }
     if (blocoAtivo < estruturaAtual.length - 1) return estruturaAtual[blocoAtivo + 1]?.bloco;
     if (indexMusicaAtual < musicas.length - 1) return musicas[indexMusicaAtual + 1]?.estrutura?.[0]?.bloco;
     return null;
-  }, [blocoAtivo, estruturaAtual, indexMusicaAtual, musicas, nextBlockOverride]);
+  }, [blocoAtivo, estruturaAtual, indexMusicaAtual, manualReturnBlock, musicas, nextBlockOverride, playbackMode]);
 
   const nextBlockIsManual = nextBlockOverride !== null;
+
+  const manualBlockCapsules = useMemo(() => {
+    const groups = new Map<string, { label: string; indices: number[] }>();
+    estruturaAtual.forEach((entry: any, index: number) => {
+      const label = blockLabel(entry?.bloco);
+      const key = label.trim().toLocaleLowerCase('pt-BR');
+      const current = groups.get(key);
+      if (current) current.indices.push(index);
+      else groups.set(key, { label, indices: [index] });
+    });
+
+    return Array.from(groups.values()).map((group) => {
+      // Se a cápsula é do bloco atual, ela funciona naturalmente como "repetir".
+      // Caso contrário preferimos a próxima ocorrência desse tipo na timeline.
+      const currentMatch = group.indices.includes(blocoAtivo) ? blocoAtivo : null;
+      const future = group.indices.find((index) => index > blocoAtivo);
+      return {
+        label: group.label,
+        targetIndex: currentMatch ?? future ?? group.indices[0],
+      };
+    });
+  }, [blocoAtivo, estruturaAtual]);
 
   const effectiveBpm = useMemo(() => {
     const base = Number(musicaAtual?.bpm || 120) || 120;
@@ -545,9 +579,10 @@ export default function ModoLiveNonStop() {
       semitons,
       queuedMusicaId,
       nextBlockOverride,
+      manualReturnBlock,
       playbackMode,
     };
-  }, [autoScroll, blocoAtivo, effectiveBpm, indexMusicaAtual, musicaAtual?.id, nextBlockOverride, playbackMode, queuedMusicaId, semitons]);
+  }, [autoScroll, blocoAtivo, effectiveBpm, indexMusicaAtual, manualReturnBlock, musicaAtual?.id, nextBlockOverride, playbackMode, queuedMusicaId, semitons]);
 
   const queuedMusica = useMemo(() => {
     if (!queuedMusicaId) return null;
@@ -1080,6 +1115,7 @@ export default function ModoLiveNonStop() {
                 semitons: snapshot.semitons,
                 queuedMusicaId: snapshot.queuedMusicaId,
                 nextBlockOverride: snapshot.nextBlockOverride,
+                manualReturnBlock: snapshot.manualReturnBlock,
                 playbackMode: snapshot.playbackMode,
               } satisfies SyncMessage,
             });
@@ -1113,6 +1149,9 @@ export default function ModoLiveNonStop() {
           const restoredNextBlock = typeof msg.nextBlockOverride === 'number' ? msg.nextBlockOverride : null;
           nextBlockOverrideRef.current = restoredNextBlock;
           setNextBlockOverride(restoredNextBlock);
+          const restoredReturnBlock = typeof msg.manualReturnBlock === 'number' ? msg.manualReturnBlock : null;
+          manualReturnBlockRef.current = restoredReturnBlock;
+          setManualReturnBlock(restoredReturnBlock);
 
           if (!msg.musicaId) return;
           const targetIndex = await ensureMusicaDisponivel(String(msg.musicaId));
@@ -1165,8 +1204,11 @@ export default function ModoLiveNonStop() {
         // ====== PRÓXIMO BLOCO (override de uma única transição) ======
         if (msg.kind === 'BLOCK_QUEUE') {
           const target = typeof msg.blockIndex === 'number' ? msg.blockIndex : null;
+          const returnIndex = typeof msg.returnIndex === 'number' ? msg.returnIndex : null;
           nextBlockOverrideRef.current = target;
           setNextBlockOverride(target);
+          manualReturnBlockRef.current = returnIndex;
+          setManualReturnBlock(returnIndex);
           return;
         }
 
@@ -1179,6 +1221,10 @@ export default function ModoLiveNonStop() {
           subChordIndexRef.current = 0;
           setSubChordIndex(0);
           blockStartEpochRef.current = null;
+          nextBlockOverrideRef.current = null;
+          setNextBlockOverride(null);
+          manualReturnBlockRef.current = null;
+          setManualReturnBlock(null);
           showStageNotice(msg.playbackMode === 'manual' ? 'Modo manual sincronizado' : 'Rolagem automática por BPM');
           return;
         }
@@ -1198,8 +1244,12 @@ export default function ModoLiveNonStop() {
 
           setIndexMusicaAtual(targetIndex);
           setBlocoAtivo(msg.blocoAtivo);
-          nextBlockOverrideRef.current = null;
-          setNextBlockOverride(null);
+          const syncedNextBlock = typeof msg.nextBlockOverride === 'number' ? msg.nextBlockOverride : null;
+          const syncedReturnBlock = typeof msg.manualReturnBlock === 'number' ? msg.manualReturnBlock : null;
+          nextBlockOverrideRef.current = syncedNextBlock;
+          setNextBlockOverride(syncedNextBlock);
+          manualReturnBlockRef.current = syncedReturnBlock;
+          setManualReturnBlock(syncedReturnBlock);
           setProgresso(0);
           subChordIndexRef.current = 0;
           setSubChordIndex(0);
@@ -1222,8 +1272,9 @@ export default function ModoLiveNonStop() {
 
         // ====== START ======
         if (msg.kind === 'START') {
-          playbackModeRef.current = 'auto';
-          setPlaybackMode('auto');
+          const incomingPlaybackMode: LivePlaybackMode = msg.playbackMode === 'manual' ? 'manual' : 'auto';
+          playbackModeRef.current = incomingPlaybackMode;
+          setPlaybackMode(incomingPlaybackMode);
           // Quem mandou START vira referência atual
           isReferenceRef.current = false;
           setIsRhythmReference(false);
@@ -1240,6 +1291,8 @@ export default function ModoLiveNonStop() {
           setBlocoAtivo(msg.blocoAtivo);
           nextBlockOverrideRef.current = null;
           setNextBlockOverride(null);
+          manualReturnBlockRef.current = null;
+          setManualReturnBlock(null);
           setProgresso(0);
           subChordIndexRef.current = 0;
           setSubChordIndex(0);
@@ -1277,7 +1330,12 @@ export default function ModoLiveNonStop() {
           if (msToStart <= 150) {
             blockStartEpochRef.current = localStartAtMs;
             await requestWakeLock();
-            setAutoScroll(true);
+            if (incomingPlaybackMode === 'auto') {
+              setAutoScroll(true);
+            } else {
+              setAutoScroll(false);
+              showStageNotice('ENTRA • Manual Sync');
+            }
           } else {
             let c = Math.min(4, Math.max(1, beatsLeft || 4));
             setCountdown(c);
@@ -1301,7 +1359,12 @@ export default function ModoLiveNonStop() {
 
                 blockStartEpochRef.current = refinedStartAtMs;
                 await requestWakeLock();
-                setAutoScroll(true);
+                if (incomingPlaybackMode === 'auto') {
+                  setAutoScroll(true);
+                } else {
+                  setAutoScroll(false);
+                  showStageNotice('ENTRA • Manual Sync');
+                }
                 return;
               }
               setCountdown(c);
@@ -1348,10 +1411,7 @@ export default function ModoLiveNonStop() {
   // ================== START COM COUNTDOWN (quem apertou play) ==================
   const startShowWithCountdown = useCallback(async () => {
     if (lockUI) return;
-    if (playbackModeRef.current === 'manual') {
-      showStageNotice('Modo manual: use Bloco ← / Bloco →');
-      return;
-    }
+    const modeAtStart = playbackModeRef.current;
     if (autoScroll || countdown !== null) return;
 
     // ✅ auto fullscreen (precisa ser dentro do gesto do usuário)
@@ -1395,7 +1455,7 @@ export default function ModoLiveNonStop() {
       blocoAtivo,
       semitons,
       musicaId: musicaAtual?.id ? String(musicaAtual.id) : undefined,
-      playbackMode: 'auto',
+      playbackMode: modeAtStart,
     });
 
     countdownTimerRef.current = window.setInterval(async () => {
@@ -1412,7 +1472,12 @@ export default function ModoLiveNonStop() {
 
         blockStartEpochRef.current = maestroStartAtMs;
         await requestWakeLock();
-        setAutoScroll(true);
+        if (modeAtStart === 'auto') {
+          setAutoScroll(true);
+        } else {
+          setAutoScroll(false);
+          showStageNotice('ENTRA • Manual Sync');
+        }
         return;
       }
       setCountdown(c);
@@ -1434,10 +1499,6 @@ export default function ModoLiveNonStop() {
 
   const togglePlay = useCallback(async () => {
     if (lockUI) return;
-    if (playbackModeRef.current === 'manual') {
-      showStageNotice('Manual Sync ativo: use os controles de bloco');
-      return;
-    }
 
     if (autoScroll || countdown !== null) {
       await pauseShow();
@@ -1453,6 +1514,14 @@ export default function ModoLiveNonStop() {
     setShowNextBlockMenu(false);
   }, []);
 
+  const clearManualPlanLocal = useCallback(() => {
+    nextBlockOverrideRef.current = null;
+    setNextBlockOverride(null);
+    manualReturnBlockRef.current = null;
+    setManualReturnBlock(null);
+    setShowNextBlockMenu(false);
+  }, []);
+
   const switchPlaybackMode = useCallback(async (nextMode: LivePlaybackMode) => {
     if (lockUI || playbackModeRef.current === nextMode) return;
     await pauseShow();
@@ -1462,10 +1531,10 @@ export default function ModoLiveNonStop() {
     subChordIndexRef.current = 0;
     setSubChordIndex(0);
     blockStartEpochRef.current = null;
-    clearNextBlockOverrideLocal();
+    clearManualPlanLocal();
     await sendSync({ kind: 'MODE', senderId: clientIdRef.current, playbackMode: nextMode });
     showStageNotice(nextMode === 'manual' ? 'Manual Sync: blocos seguem os controles do palco' : 'Auto BPM: rolagem automática restaurada');
-  }, [clearNextBlockOverrideLocal, lockUI, pauseShow, sendSync, showStageNotice]);
+  }, [clearManualPlanLocal, lockUI, pauseShow, sendSync, showStageNotice]);
 
   const saltarParaIndex = useCallback(
     async (nextIndex: number) => {
@@ -1562,28 +1631,45 @@ export default function ModoLiveNonStop() {
       if (lockUI) return;
       if (target !== null && (target < 0 || target >= estruturaAtual.length)) return;
 
+      let returnIndex = manualReturnBlockRef.current;
+      if (playbackModeRef.current === 'manual') {
+        const naturalNext = blocoAtivo < estruturaAtual.length - 1 ? blocoAtivo + 1 : null;
+        if (target === null) {
+          // Cancela apenas a nova cápsula. Se já estamos dentro de um desvio,
+          // o retorno à sequência original continua preservado.
+          returnIndex = manualReturnBlockRef.current;
+        } else if (returnIndex === null && naturalNext !== null && target !== naturalNext) {
+          returnIndex = naturalNext;
+        }
+      } else {
+        returnIndex = null;
+      }
+
       nextBlockOverrideRef.current = target;
       setNextBlockOverride(target);
+      manualReturnBlockRef.current = returnIndex;
+      setManualReturnBlock(returnIndex);
       setShowNextBlockMenu(false);
 
       if (target === null) {
-        showStageNotice('Próximo bloco voltou à sequência normal');
+        showStageNotice(returnIndex !== null ? 'Próximo: retorno à sequência original' : 'Próximo bloco voltou à sequência normal');
       } else {
         const label = blockLabel(estruturaAtual[target]?.bloco);
-        showStageNotice(`Próximo bloco: ${label}`);
+        showStageNotice(`Armado: ${label}`);
       }
 
       await sendSync({
         kind: 'BLOCK_QUEUE',
         senderId: clientIdRef.current,
         blockIndex: target,
+        returnIndex,
       });
     },
-    [estruturaAtual, lockUI, sendSync, showStageNotice]
+    [blocoAtivo, estruturaAtual, lockUI, sendSync, showStageNotice]
   );
 
   const saltarParaBloco = useCallback(
-    async (nextBlock: number) => {
+    async (nextBlock: number, preserveManualPlan = false) => {
       if (lockUI || nextBlock < 0 || nextBlock >= estruturaAtual.length) return;
 
       const wasPlaying = autoScroll;
@@ -1605,7 +1691,7 @@ export default function ModoLiveNonStop() {
         referenceBlockStartEpochMsRef.current = maestroStartAtMs;
       }
 
-      clearNextBlockOverrideLocal();
+      if (!preserveManualPlan) clearManualPlanLocal();
       setBlocoAtivo(nextBlock);
       setProgresso(0);
       subChordIndexRef.current = 0;
@@ -1626,20 +1712,82 @@ export default function ModoLiveNonStop() {
         resume: wasPlaying,
         maestroId: wasPlaying ? referenceId : undefined,
         maestroStartAtMs,
+        nextBlockOverride: preserveManualPlan ? nextBlockOverrideRef.current : null,
+        manualReturnBlock: preserveManualPlan ? manualReturnBlockRef.current : null,
       });
     },
-    [autoScroll, clearNextBlockOverrideLocal, estruturaAtual.length, indexMusicaAtual, lockUI, musicaAtual?.id, requestWakeLock, sendSync]
+    [autoScroll, clearManualPlanLocal, estruturaAtual.length, indexMusicaAtual, lockUI, musicaAtual?.id, requestWakeLock, sendSync]
   );
 
+  const commitManualTransition = useCallback(async () => {
+    if (lockUI || estruturaAtual.length === 0) return;
+
+    const queuedTarget = nextBlockOverrideRef.current;
+    const returnTarget = manualReturnBlockRef.current;
+    let target: number | null = null;
+    let nextReturn: number | null = returnTarget;
+
+    if (queuedTarget !== null && queuedTarget >= 0 && queuedTarget < estruturaAtual.length) {
+      target = queuedTarget;
+      nextBlockOverrideRef.current = null;
+      setNextBlockOverride(null);
+    } else if (returnTarget !== null && returnTarget >= 0 && returnTarget < estruturaAtual.length) {
+      target = returnTarget;
+      nextReturn = null;
+      manualReturnBlockRef.current = null;
+      setManualReturnBlock(null);
+    } else if (blocoAtivo < estruturaAtual.length - 1) {
+      target = blocoAtivo + 1;
+      nextReturn = null;
+    }
+
+    if (target === null) {
+      showStageNotice('Fim da estrutura');
+      return;
+    }
+
+    manualReturnBlockRef.current = nextReturn;
+    setManualReturnBlock(nextReturn);
+    await saltarParaBloco(target, true);
+  }, [blocoAtivo, estruturaAtual.length, lockUI, saltarParaBloco, showStageNotice]);
+
   const prevBlock = useCallback(() => void saltarParaBloco(blocoAtivo - 1), [blocoAtivo, saltarParaBloco]);
-  const nextBlock = useCallback(() => void saltarParaBloco(blocoAtivo + 1), [blocoAtivo, saltarParaBloco]);
+  const nextBlock = useCallback(() => {
+    if (playbackModeRef.current === 'manual') void commitManualTransition();
+    else void saltarParaBloco(blocoAtivo + 1);
+  }, [blocoAtivo, commitManualTransition, saltarParaBloco]);
 
   // Reiniciar bloco agora é uma ação sincronizada e preserva a referência
   // de ritmo atual (por exemplo, o aparelho do baterista).
   const restartCurrentBlock = useCallback(() => {
     if (lockUI) return;
-    void saltarParaBloco(blocoAtivo);
-  }, [blocoAtivo, lockUI, saltarParaBloco]);
+    void saltarParaBloco(blocoAtivo, true);
+    showStageNotice('Bloco resetado em todos os aparelhos');
+  }, [blocoAtivo, lockUI, saltarParaBloco, showStageNotice]);
+
+  const restartCurrentSong = useCallback(async () => {
+    if (lockUI) return;
+    await pauseShow();
+    clearManualPlanLocal();
+    setBlocoAtivo(0);
+    setProgresso(0);
+    subChordIndexRef.current = 0;
+    setSubChordIndex(0);
+    blockStartEpochRef.current = null;
+    referenceBlockStartEpochMsRef.current = null;
+    activeRunLoggedRef.current = false;
+
+    await sendSync({
+      kind: 'GOTO',
+      senderId: clientIdRef.current,
+      indexMusicaAtual,
+      blocoAtivo: 0,
+      musicaId: musicaAtual?.id ? String(musicaAtual.id) : undefined,
+      nextBlockOverride: null,
+      manualReturnBlock: null,
+    });
+    showStageNotice('Música no início • pronta para nova contagem');
+  }, [clearManualPlanLocal, indexMusicaAtual, lockUI, musicaAtual?.id, pauseShow, sendSync, showStageNotice]);
 
   const prevSong = useCallback(async () => {
     if (lockUI) return;
@@ -2475,13 +2623,13 @@ export default function ModoLiveNonStop() {
           {/* PLAY */}
           <button
             onClick={togglePlay}
-            disabled={lockUI || playbackMode === 'manual'}
+            disabled={lockUI}
             className={cn(
               'p-3 rounded-full transition-all',
               autoScroll || countdown !== null ? 'bg-red-600' : 'bg-blue-600',
               lockUI ? 'opacity-40' : 'active:scale-95'
             )}
-            title={playbackMode === 'manual' ? 'Modo manual: use os controles de bloco' : autoScroll ? 'Pausar' : 'Iniciar (contagem sincronizada + click opcional)'}
+            title={playbackMode === 'manual' ? 'Contagem sincronizada de 4 tempos (não troca blocos automaticamente)' : autoScroll ? 'Pausar' : 'Iniciar (contagem sincronizada + click opcional)'}
           >
             {autoScroll || countdown !== null ? <Pause size={20} fill="white" /> : <Play size={20} fill="white" />}
           </button>
@@ -2699,15 +2847,93 @@ export default function ModoLiveNonStop() {
         )}
       </main>
 
-      {/* FOOTER */}
-      {playbackMode === 'manual' && (
-        <div className={cn('px-3 sm:px-5 pb-2', chromeClass)}>
-          <div className="mx-auto max-w-3xl rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-center text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-amber-200">
-            Manual Sync ativo • Bloco ← / Bloco → em qualquer aparelho muda o bloco para todos
+      {/* CONTROLE MANUAL SEMPRE ACESSÍVEL — pensado para ensaio/palco */}
+      {playbackMode === 'manual' && !preflightOpen && !menuAberto && (
+        <div className="fixed z-[170] right-2 sm:right-3 bottom-[88px] sm:bottom-[96px] w-[calc(100%-1rem)] sm:w-[min(560px,calc(100%-1.5rem))] rounded-2xl border border-amber-400/20 bg-black/85 backdrop-blur-xl shadow-2xl p-2.5 sm:p-3">
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <div className="min-w-0">
+              <p className="text-[8px] font-black uppercase tracking-[0.18em] text-amber-300/70">Próximo bloco</p>
+              <p className="text-[10px] sm:text-xs font-black uppercase truncate text-white">
+                {nextBlockOverride !== null
+                  ? `Armado: ${blockLabel(estruturaAtual[nextBlockOverride]?.bloco)}`
+                  : manualReturnBlock !== null
+                  ? `Retorno: ${blockLabel(estruturaAtual[manualReturnBlock]?.bloco)}`
+                  : `Natural: ${blocoAtivo < estruturaAtual.length - 1 ? blockLabel(estruturaAtual[blocoAtivo + 1]?.bloco) : 'Fim'}`}
+              </p>
+            </div>
+            {(nextBlockOverride !== null || manualReturnBlock !== null) && (
+              <button
+                disabled={lockUI}
+                onClick={() => void agendarProximoBloco(null)}
+                className="shrink-0 px-2.5 py-1.5 rounded-lg border border-white/10 bg-white/5 text-[8px] font-black uppercase tracking-wider text-zinc-400 disabled:opacity-30"
+              >
+                Limpar cápsula
+              </button>
+            )}
+          </div>
+
+          <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-2">
+            {manualBlockCapsules.map((capsule) => {
+              const selected = nextBlockOverride === capsule.targetIndex;
+              const current = blocoAtivo === capsule.targetIndex;
+              return (
+                <button
+                  key={`manual-capsule-${capsule.label}`}
+                  disabled={lockUI}
+                  onClick={() => void agendarProximoBloco(capsule.targetIndex)}
+                  className={cn(
+                    'shrink-0 min-h-8 px-3 rounded-full border text-[8px] sm:text-[9px] font-black uppercase tracking-wider transition-all disabled:opacity-30',
+                    selected
+                      ? 'border-amber-300/50 bg-amber-400/20 text-amber-100'
+                      : current
+                      ? 'border-blue-400/35 bg-blue-400/10 text-blue-200'
+                      : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10'
+                  )}
+                  title={current ? `Repetir ${capsule.label}` : `Armar ${capsule.label} como próximo bloco`}
+                >
+                  {capsule.label}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="grid grid-cols-[auto_auto_auto_1fr] gap-1.5">
+            <button
+              disabled={lockUI}
+              onClick={() => void restartCurrentSong()}
+              className="min-h-10 px-2.5 rounded-xl border border-white/10 bg-white/5 text-[8px] font-black uppercase tracking-wider text-zinc-200 disabled:opacity-30"
+              title="Voltar a música inteira para o primeiro bloco em todos os aparelhos"
+            >
+              ⏮ Música
+            </button>
+            <button
+              disabled={lockUI}
+              onClick={restartCurrentBlock}
+              className="min-h-10 px-2.5 rounded-xl border border-white/10 bg-white/5 text-[8px] font-black uppercase tracking-wider text-zinc-200 disabled:opacity-30"
+              title="Resetar o bloco atual em todos os aparelhos"
+            >
+              ↺ Bloco
+            </button>
+            <button
+              disabled={lockUI || blocoAtivo <= 0}
+              onClick={prevBlock}
+              className="min-h-10 px-2.5 rounded-xl border border-white/10 bg-white/5 text-[8px] font-black uppercase tracking-wider text-zinc-200 disabled:opacity-20"
+            >
+              ←
+            </button>
+            <button
+              disabled={lockUI || (blocoAtivo >= estruturaAtual.length - 1 && nextBlockOverride === null && manualReturnBlock === null)}
+              onClick={() => void commitManualTransition()}
+              className="min-h-10 px-4 rounded-xl border border-amber-300/35 bg-amber-500/20 text-[9px] sm:text-[10px] font-black uppercase tracking-[0.16em] text-amber-100 disabled:opacity-20 active:scale-[0.98]"
+              title="Efetivar a troca no momento exato da música. Todos os aparelhos mudam juntos."
+            >
+              Virar →
+            </button>
           </div>
         </div>
       )}
 
+      {/* FOOTER */}
       <footer className={cn('px-2 sm:px-4 py-3 sm:py-4 bg-black border-t border-white/5 flex items-center justify-between gap-2', chromeClass)}>
         {/* Transposição */}
         <div className="flex items-center gap-2">
@@ -2750,8 +2976,10 @@ export default function ModoLiveNonStop() {
 
         {/* Direita */}
         <div className="flex items-center gap-2 sm:gap-3">
+          {playbackMode !== 'manual' && (
+            <>
           <button
-            disabled={lockUI || playbackMode === 'manual' || estruturaAtual.length === 0}
+            disabled={lockUI || estruturaAtual.length === 0}
             onClick={() => setShowNextBlockMenu(true)}
             className={cn(
               'min-h-11 px-3 rounded-2xl border text-[9px] font-black uppercase tracking-wider disabled:opacity-20',
@@ -2787,12 +3015,14 @@ export default function ModoLiveNonStop() {
               'bg-white/5 border-white/10 text-zinc-200 hover:bg-white/10 active:scale-95',
               lockUI ? 'opacity-40' : ''
             )}
-            title="Reiniciar o tempo do bloco atual"
+            title="Resetar o bloco atual em todos os aparelhos"
           >
             <RotateCcw size={16} className="text-blue-300" />
-            Iniciar bloco
+            Reset bloco
           </button>
 
+            </>
+          )}
           <button
             disabled={lockUI}
             onClick={() => setMenuAberto(true)}
@@ -2812,7 +3042,7 @@ export default function ModoLiveNonStop() {
               <div>
                 <p className="text-[9px] font-black uppercase tracking-[0.18em] text-violet-300">Utilidade rápida</p>
                 <h2 className="mt-1 text-lg sm:text-xl font-black uppercase">Escolher próximo bloco</h2>
-                <p className="mt-1 text-xs text-zinc-500">Vale só para a próxima transição. A estrutura original da música não é alterada.</p>
+                <p className="mt-1 text-xs text-zinc-500">No Manual Sync, a escolha fica armada até você tocar VIRAR. Depois do desvio, o app retorna ao ponto natural da sequência.</p>
               </div>
               <button onClick={() => setShowNextBlockMenu(false)} className="p-2 rounded-xl bg-white/5 text-zinc-400"><XCircle size={20} /></button>
             </div>
