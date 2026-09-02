@@ -340,23 +340,94 @@ export default function SongStageRenderer({
       <div className="flex-1 min-h-0 overflow-y-auto px-4 sm:px-8 lg:px-12 flex flex-col">
         <div className="my-auto w-full py-3 sm:py-5">
         {viewMode === 'chords' ? (
-          <div className="w-full max-w-6xl mx-auto flex flex-wrap justify-center gap-x-6 sm:gap-x-8 gap-y-4 items-center">
-            {currentBlock?.lines.slice(0, currentBlock.duration).map((line, lineIndex) => {
-              const names = chordCellNames(line.chordCell).map((chord) => formatStageChord(chord, semitones, harmonyNotation, keySignature));
-              const active = lineIndex === safeMeasureIndex;
-              return (
-                <span
-                  key={`chord-${lineIndex}`}
-                  style={{ fontSize: active ? scaledClamp(52, 12, 110, fontScale) : scaledClamp(38, 8.5, 78, fontScale) }}
-                  className={cn(
-                    'font-mono font-black transition-all duration-150',
-                    active ? 'text-white drop-shadow-[0_0_30px_rgba(255,255,255,0.35)]' : 'text-yellow-500/20',
-                  )}
-                >
-                  {names.length ? names.join(' / ') : '—'}
-                </span>
-              );
-            })}
+          <div className="w-full max-w-5xl mx-auto space-y-3 sm:space-y-4">
+            <div className="flex items-center justify-between gap-3 px-1">
+              <span className="text-[8px] sm:text-[9px] font-black uppercase tracking-[0.22em] text-zinc-600">
+                Compassos
+              </span>
+              <span className="text-[8px] sm:text-[9px] font-black uppercase tracking-[0.18em] text-yellow-500/70">
+                Agora {safeMeasureIndex + 1}/{currentDuration}
+              </span>
+            </div>
+
+            <div
+              className={cn(
+                'grid gap-2.5 sm:gap-3',
+                currentDuration <= 2
+                  ? 'grid-cols-2 max-w-xl mx-auto'
+                  : currentDuration <= 4
+                    ? 'grid-cols-2 sm:grid-cols-4'
+                    : 'grid-cols-2 sm:grid-cols-4 lg:grid-cols-6',
+              )}
+            >
+              {currentBlock?.lines.slice(0, currentBlock.duration).map((line, lineIndex) => {
+                const names = chordCellNames(line.chordCell).map((chord) =>
+                  formatStageChord(chord, semitones, harmonyNotation, keySignature),
+                );
+                const active = lineIndex === safeMeasureIndex;
+                const densityScale = names.length >= 4 ? 0.68 : names.length === 3 ? 0.76 : names.length === 2 ? 0.88 : 1;
+
+                return (
+                  <div
+                    key={`chord-${lineIndex}`}
+                    className={cn(
+                      'min-w-0 min-h-[106px] sm:min-h-[122px] rounded-[1.2rem] sm:rounded-[1.4rem] border px-3 py-2.5 sm:px-4 sm:py-3 flex flex-col transition-all duration-150',
+                      active
+                        ? 'border-yellow-400/55 bg-yellow-500/10 shadow-[0_0_26px_rgba(234,179,8,0.10)]'
+                        : 'border-white/[0.065] bg-white/[0.025]',
+                    )}
+                  >
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <span
+                        className={cn(
+                          'text-[8px] sm:text-[9px] font-black uppercase tracking-[0.16em]',
+                          active ? 'text-yellow-300' : 'text-zinc-600',
+                        )}
+                      >
+                        C.{lineIndex + 1}
+                      </span>
+                      {active && (
+                        <span className="rounded-full bg-yellow-400/15 border border-yellow-400/20 px-2 py-0.5 text-[7px] sm:text-[8px] font-black uppercase tracking-widest text-yellow-200">
+                          Agora
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex-1 min-w-0 flex flex-wrap items-center justify-center content-center gap-x-2 gap-y-1.5">
+                      {names.length ? (
+                        names.map((name, chordIndex) => (
+                          <div key={`${lineIndex}-${chordIndex}-${name}`} className="flex items-center gap-2 min-w-0">
+                            {chordIndex > 0 && (
+                              <span className="text-[clamp(16px,4vw,28px)] font-black text-zinc-700 select-none">/</span>
+                            )}
+                            <span
+                              style={{
+                                fontSize: active
+                                  ? scaledClamp(28, 7.2, 56, fontScale * densityScale)
+                                  : scaledClamp(24, 5.8, 44, fontScale * densityScale),
+                              }}
+                              className={cn(
+                                'font-mono font-black leading-none whitespace-nowrap',
+                                active ? 'text-white' : 'text-yellow-500/55',
+                              )}
+                            >
+                              {name}
+                            </span>
+                          </div>
+                        ))
+                      ) : (
+                        <span
+                          style={{ fontSize: scaledClamp(24, 5.8, 44, fontScale) }}
+                          className={cn('font-mono font-black leading-none', active ? 'text-white' : 'text-zinc-700')}
+                        >
+                          —
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         ) : viewMode === 'both' && currentBlock && !currentBlock.lyricsSynced ? (
           <div className="w-full max-w-6xl mx-auto space-y-5 sm:space-y-7">
