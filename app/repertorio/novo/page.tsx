@@ -481,6 +481,7 @@ export default function NovoRepertorioInteligente() {
                 chords={blocoAtual.acordes}
                 lyrics={blocoAtual.letra}
                 keySignature={dadosBase.tom}
+                onDetectedKey={(value) => setDadosBase((prev) => ({ ...prev, tom: value }))}
                 onDurationChange={handleCompassoChange}
                 onChordChange={updateAcordeNoCompasso}
                 onLyricsChange={(value) => setBlocoAtual((prev) => ({ ...prev, letra: value }))}

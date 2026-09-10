@@ -1,10 +1,11 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { AlignLeft, Check, Clock3, MousePointer2, Plus, Rows3, X } from 'lucide-react';
+import { AlignLeft, Check, ClipboardPaste, Clock3, MousePointer2, Plus, Rows3, Sparkles, X } from 'lucide-react';
 import { ChordLyricLine } from '@/components/SongStageRenderer';
 import { parseChordCell, serializeChordAnchors, type ChordAnchor } from '@/lib/songStage';
 import { buildChordPalette, normalizeChordInput, type ChordPaletteEntry } from '@/lib/chordPalette';
+import { parseChordSheet, type ImportedChordCue, type ParsedChordSheet } from '@/lib/chordSheetImport';
 
 type SongTimingEditorProps = {
   duration: number;
@@ -14,6 +15,7 @@ type SongTimingEditorProps = {
   onChordChange: (index: number, value: string) => void;
   onLyricsChange: (value: string) => void;
   keySignature?: string;
+  onDetectedKey?: (value: string) => void;
   maxMeasures?: number;
 };
 
@@ -45,6 +47,7 @@ export default function SongTimingEditor({
   onChordChange,
   onLyricsChange,
   keySignature = '',
+  onDetectedKey,
   maxMeasures = 16,
 }: SongTimingEditorProps) {
   const [mode, setMode] = useState<'sync' | 'free'>('sync');
@@ -56,6 +59,9 @@ export default function SongTimingEditor({
   const [lyricPoolLines, setLyricPoolLines] = useState<string[]>([]);
   const [lyricPoolCursor, setLyricPoolCursor] = useState(0);
   const [ignoreBlankLyricPoolLines, setIgnoreBlankLyricPoolLines] = useState(true);
+  const [chordSheetDraft, setChordSheetDraft] = useState('');
+  const [importedSheet, setImportedSheet] = useState<ParsedChordSheet | null>(null);
+  const [importedCueCursor, setImportedCueCursor] = useState(0);
   const safeDuration = Math.max(1, Math.min(maxMeasures, Number(duration) || 1));
 
   const suggestedPalette = useMemo(() => buildChordPalette(keySignature), [keySignature]);
@@ -112,6 +118,68 @@ export default function SongTimingEditor({
 
   const nextLyricPoolLine = lyricPoolLines[lyricPoolCursor] ?? '';
   const lyricPoolRemaining = Math.max(0, lyricPoolLines.length - lyricPoolCursor);
+
+
+  const importedCues = importedSheet?.cues || [];
+  const importedCue = importedCues[importedCueCursor] || null;
+  const importedRemaining = Math.max(0, importedCues.length - importedCueCursor);
+
+  const loadChordSheet = () => {
+    const parsed = parseChordSheet(chordSheetDraft);
+    setImportedSheet(parsed);
+    setImportedCueCursor(0);
+    setEnabledChords((prev) =>
+      uniqueStrings([
+        ...prev,
+        ...parsed.cues.flatMap((cue) => cue.chords),
+      ]),
+    );
+  };
+
+  const clearChordSheet = () => {
+    setChordSheetDraft('');
+    setImportedSheet(null);
+    setImportedCueCursor(0);
+  };
+
+  const applyImportedCueToMeasure = (measureIndex: number, cue: ImportedChordCue | null = importedCue) => {
+    if (!cue) return;
+    changeLyricLine(measureIndex, cue.lyric);
+    if (cue.anchors.length > 0) setAnchors(measureIndex, cue.anchors);
+    else onChordChange(measureIndex, '');
+    if (cue.chords.length > 0) {
+      setEnabledChords((prev) => uniqueStrings([...prev, ...cue.chords]));
+    }
+    if (cue.id === importedCue?.id) {
+      setImportedCueCursor((current) => Math.min(importedCues.length, current + 1));
+    }
+  };
+
+  const fillEmptyMeasuresFromImport = () => {
+    if (!importedCue || importedCueCursor >= importedCues.length) return;
+    const nextLyrics = rawLines.length ? [...rawLines] : [];
+    while (nextLyrics.length < safeDuration) nextLyrics.push('');
+
+    let cursor = importedCueCursor;
+    const chordsToEnable: string[] = [];
+    for (let index = 0; index < safeDuration && cursor < importedCues.length; index += 1) {
+      const currentHasLyrics = String(nextLyrics[index] || '').trim().length > 0;
+      const currentHasChords = parseChordCell(chords[index] || '').length > 0;
+      if (currentHasLyrics || currentHasChords) continue;
+
+      const cue = importedCues[cursor];
+      nextLyrics[index] = cue.lyric;
+      if (cue.anchors.length > 0) setAnchors(index, cue.anchors);
+      chordsToEnable.push(...cue.chords);
+      cursor += 1;
+    }
+
+    onLyricsChange(nextLyrics.join('\n'));
+    if (chordsToEnable.length > 0) {
+      setEnabledChords((prev) => uniqueStrings([...prev, ...chordsToEnable]));
+    }
+    setImportedCueCursor(cursor);
+  };
 
   const loadLyricPool = () => {
     const normalized = String(lyricPoolDraft || '').replace(/\r\n?/g, '\n');
@@ -287,6 +355,164 @@ export default function SongTimingEditor({
           <p className="text-[9px] leading-relaxed text-slate-600">
             Padrão maior: <span className="text-slate-500">I · ii7 · iii7 · IV · V · vi7 · vii°</span> + inversões comuns <span className="text-slate-500">I/3 e V/7</span>. Ex.: em C, C · Dm7 · Em7 · F · G · Am7 · B° · C/E · G/B.
           </p>
+        )}
+      </div>
+
+      <div className="rounded-2xl border border-cyan-500/15 bg-cyan-500/[0.035] p-4 space-y-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-cyan-300 flex items-center gap-2">
+              <ClipboardPaste size={13} /> Importar cifra completa
+            </p>
+            <p className="mt-1 text-[11px] text-slate-500 max-w-2xl">
+              Cole a cifra como veio do site. O Band Manager separa seções, letra e acordes, preserva a ordem e tenta manter cada acorde sobre a mesma região da frase.
+            </p>
+          </div>
+          {importedCues.length > 0 && (
+            <span className="rounded-lg border border-cyan-500/15 bg-cyan-500/5 px-2.5 py-1 text-[9px] font-black uppercase tracking-wider text-cyan-300">
+              {importedCueCursor}/{importedCues.length} usados · {importedRemaining} restantes
+            </span>
+          )}
+        </div>
+
+        <textarea
+          value={chordSheetDraft}
+          onChange={(event) => setChordSheetDraft(event.target.value)}
+          rows={8}
+          placeholder={'Cole aqui a cifra inteira…\n\n[Verso]\nC                G/B\nEis que estou à porta e bato\nAm7                 F\nSe alguém ouvir a minha voz'}
+          className="w-full rounded-xl border border-white/10 bg-slate-950/70 p-3 font-mono text-xs leading-relaxed text-slate-200 outline-none focus:border-cyan-500/35 resize-y"
+        />
+
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={loadChordSheet}
+            disabled={!chordSheetDraft.trim()}
+            className="min-h-10 rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-3 text-[9px] font-black uppercase tracking-wider text-cyan-300 disabled:opacity-30 flex items-center gap-2"
+          >
+            <Sparkles size={12} /> Analisar cifra
+          </button>
+          {importedCues.length > 0 && (
+            <button
+              type="button"
+              onClick={fillEmptyMeasuresFromImport}
+              disabled={importedRemaining === 0}
+              className="min-h-10 rounded-xl border border-cyan-500/15 bg-cyan-500/[0.06] px-3 text-[9px] font-black uppercase tracking-wider text-cyan-200 disabled:opacity-30"
+              title="Preenche somente compassos ainda vazios com os próximos trechos importados"
+            >
+              Preencher vazios
+            </button>
+          )}
+          {importedSheet && (
+            <button
+              type="button"
+              onClick={clearChordSheet}
+              className="min-h-10 rounded-xl border border-white/5 bg-slate-950/40 px-3 text-[9px] font-black uppercase tracking-wider text-slate-600 hover:text-red-300"
+            >
+              Limpar importação
+            </button>
+          )}
+        </div>
+
+        {importedSheet && (
+          <div className="space-y-3 rounded-xl border border-white/5 bg-slate-950/45 p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              {importedSheet.keySignature && (
+                <>
+                  <span className="rounded-lg border border-emerald-500/15 bg-emerald-500/5 px-2.5 py-1 text-[9px] font-black uppercase text-emerald-300">
+                    Tom detectado: {importedSheet.keySignature}
+                  </span>
+                  {onDetectedKey && importedSheet.keySignature !== keySignature && (
+                    <button
+                      type="button"
+                      onClick={() => onDetectedKey(importedSheet.keySignature)}
+                      className="rounded-lg border border-emerald-500/15 bg-emerald-500/10 px-2.5 py-1 text-[9px] font-black uppercase text-emerald-200"
+                    >
+                      Usar este tom
+                    </button>
+                  )}
+                </>
+              )}
+              <span className="text-[9px] font-black uppercase text-slate-600">
+                {importedSheet.sections.length} seções · {importedCues.length} trechos
+              </span>
+            </div>
+
+            {importedSheet.sections.length > 0 && (
+              <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
+                {importedSheet.sections.map((item) => {
+                  const active = importedCue?.section === item.label;
+                  return (
+                    <button
+                      key={`${item.label}-${item.startIndex}`}
+                      type="button"
+                      onClick={() => setImportedCueCursor(item.startIndex)}
+                      className={`shrink-0 rounded-full border px-3 py-1.5 text-[9px] font-black uppercase tracking-wider transition-all ${
+                        active
+                          ? 'border-cyan-400/35 bg-cyan-500/10 text-cyan-200'
+                          : 'border-white/5 bg-white/[0.02] text-slate-600 hover:text-slate-300'
+                      }`}
+                    >
+                      {item.label} · {item.cueCount}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {importedCue ? (
+              <div className="rounded-xl border border-cyan-500/15 bg-cyan-500/[0.04] p-3 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-[8px] font-black uppercase tracking-widest text-cyan-500/60">
+                      Próximo trecho · {importedCue.section}
+                    </p>
+                    <p className="mt-1 text-sm font-bold text-cyan-100">
+                      {importedCue.lyric || '(trecho instrumental)'}
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setImportedCueCursor((current) => Math.max(0, current - 1))}
+                      disabled={importedCueCursor === 0}
+                      className="min-h-9 rounded-lg border border-white/5 bg-white/[0.03] px-2.5 text-[9px] font-black uppercase text-slate-500 disabled:opacity-25"
+                    >
+                      ← Voltar 1
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setImportedCueCursor((current) => Math.min(importedCues.length, current + 1))}
+                      className="min-h-9 rounded-lg border border-white/5 bg-white/[0.03] px-2.5 text-[9px] font-black uppercase text-slate-500"
+                    >
+                      Pular →
+                    </button>
+                  </div>
+                </div>
+                {importedCue.chords.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {importedCue.chords.map((chord, index) => (
+                      <span key={`${chord}-${index}`} className="rounded-lg border border-yellow-500/20 bg-yellow-500/10 px-2 py-1 font-mono text-[10px] font-black text-yellow-300">
+                        {chord}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {importedCue.rawChordLine && importedCue.lyric && (
+                  <div className="overflow-x-auto rounded-lg border border-white/5 bg-black/20 p-2 font-mono text-[10px] leading-relaxed text-slate-500 whitespace-pre">
+                    <div className="text-yellow-500/70">{importedCue.rawChordLine}</div>
+                    <div className="text-slate-300">{importedCue.lyric}</div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="text-[10px] text-emerald-400">Todos os trechos importados foram usados.</p>
+            )}
+
+            {importedSheet.warnings.map((warning) => (
+              <p key={warning} className="text-[9px] font-bold text-yellow-400/80">⚠ {warning}</p>
+            ))}
+          </div>
         )}
       </div>
 
@@ -468,6 +694,22 @@ export default function SongTimingEditor({
                     <span className="absolute top-1 left-3 text-[8px] font-black text-slate-600 uppercase tracking-wider">
                       Letra
                     </span>
+                    {importedCue && (
+                      <button
+                        type="button"
+                        onClick={() => applyImportedCueToMeasure(index)}
+                        className="mt-2 w-full rounded-xl border border-cyan-500/20 bg-cyan-500/[0.07] px-3 py-2 text-left text-[9px] font-black text-cyan-300 hover:border-cyan-500/35 transition-all"
+                        title="Usar letra + acordes do próximo trecho importado neste compasso"
+                      >
+                        <span className="uppercase tracking-wider opacity-60">Usar próximo da cifra:</span>{' '}
+                        <span className="normal-case tracking-normal text-cyan-100">
+                          {importedCue.lyric || '(instrumental)'}
+                        </span>
+                        {importedCue.chords.length > 0 && (
+                          <span className="ml-2 font-mono text-yellow-300">[{importedCue.chords.join(' · ')}]</span>
+                        )}
+                      </button>
+                    )}
                     {lyricPoolRemaining > 0 && (
                       <button
                         type="button"
